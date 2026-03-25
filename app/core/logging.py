@@ -30,7 +30,7 @@ def setup_logging() -> None:
         # ── Development: pretty console output ────────────────────────────
         logger.add(
             sys.stdout,
-            level=settings.LOG_LEVEL,
+            level=settings.LOG_LEVEL, #INFO: no debug | DEBUG: everything is logged
             format=(
                 "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
                 "<level>{level: <8}</level> | "
