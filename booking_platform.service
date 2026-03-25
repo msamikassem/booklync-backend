@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Systemd service file for the FastAPI backend
+# File location on your VPS: /etc/systemd/system/booking_platform.service
+#
+# SETUP STEPS:
+# 1. Copy this file:    sudo cp booking_platform.service /etc/systemd/system/
+# 2. Reload systemd:    sudo systemctl daemon-reload
+# 3. Start service:     sudo systemctl start booking_platform
+# 4. Enable on boot:    sudo systemctl enable booking_platform
+# 5. Check status:      sudo systemctl status booking_platform
+# 6. View logs:         sudo journalctl -u booking_platform -f
+#
+# Replace /home/youruser/booking_platform with your actual project path.
+# Replace youruser with your actual VPS username.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=Booking Platform FastAPI Backend
+# Start after network and PostgreSQL are ready
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=exec
+User=youruser
+Group=youruser
+WorkingDirectory=/home/youruser/booking_platform
+
+# Load environment variables from .env file
+EnvironmentFile=/home/youruser/booking_platform/.env
+
+# The command that starts the server
+# --workers 4: typically 2 × CPU cores for I/O-bound workloads
+# --host 127.0.0.1: only listen locally — Nginx is the public entry point
+ExecStart=/home/youruser/booking_platform/venv/bin/uvicorn \
+    app.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 4 \
+    --log-level info \
+    --access-log \
+    --no-use-colors
+
+# Restart policy — restart automatically if the process crashes
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Output logs to systemd journal (accessible via journalctl)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=booking_platform
+
+[Install]
+WantedBy=multi-user.target
