@@ -23,7 +23,7 @@ from app.core.logging import setup_logging
 from app.core.exceptions import register_exception_handlers
 
 # ── Routers — uncomment each as you build them ────────────────────────────────
-from app.api.v1.endpoints import auth,agents
+from app.api.v1.endpoints import auth,agents,employees
 # from app.api.v1.endpoints import auth, businesses, agents, employees
 # from app.api.v1.endpoints import services, appointments, customers, availability
 # from app.api.v1.endpoints import twilio_webhook
@@ -94,7 +94,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router,         prefix="/api/v1/auth",         tags=["Auth"])
     # app.include_router(businesses.router,   prefix="/api/v1/businesses",   tags=["Businesses"])
     app.include_router(agents.router,       prefix="/api/v1/agents",       tags=["Agents"])
-    # app.include_router(employees.router,    prefix="/api/v1/employees",    tags=["Employees"])
+    app.include_router(employees.router,    prefix="/api/v1/employees",    tags=["Employees"])
     # app.include_router(services.router,     prefix="/api/v1/services",     tags=["Services"])
     # app.include_router(appointments.router, prefix="/api/v1/appointments", tags=["Appointments"])
     # app.include_router(customers.router,    prefix="/api/v1/customers",    tags=["Customers"])
