@@ -23,7 +23,7 @@ from app.core.logging import setup_logging
 from app.core.exceptions import register_exception_handlers
 
 # ── Routers — uncomment each as you build them ────────────────────────────────
-from app.api.v1.endpoints import auth,agents,employees,services,business_hours,availability
+from app.api.v1.endpoints import auth,agents,employees,services,business_hours,availability,appointments,customers
 # from app.api.v1.endpoints import auth, businesses, agents, employees
 # from app.api.v1.endpoints import services, appointments, customers, availability
 # from app.api.v1.endpoints import twilio_webhook
@@ -97,8 +97,8 @@ def create_app() -> FastAPI:
     app.include_router(employees.router,    prefix="/api/v1/employees",    tags=["Employees"])
     app.include_router(services.router,     prefix="/api/v1/services",     tags=["Services"])
     app.include_router(business_hours.router,     prefix="/api/v1/services",     tags=["business hours"])
-    # app.include_router(appointments.router, prefix="/api/v1/appointments", tags=["Appointments"])
-    # app.include_router(customers.router,    prefix="/api/v1/customers",    tags=["Customers"])
+    app.include_router(appointments.router, prefix="/api/v1/appointments", tags=["Appointments"])
+    app.include_router(customers.router,    prefix="/api/v1/customers",    tags=["Customers"])
     app.include_router(availability.router, prefix="/api/v1/availability", tags=["Availability"])
     # app.include_router(twilio_webhook.router, prefix="/api/v1/twilio",     tags=["Twilio"])
 
