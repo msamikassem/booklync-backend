@@ -23,7 +23,7 @@ from app.core.logging import setup_logging
 from app.core.exceptions import register_exception_handlers
 
 # ── Routers — uncomment each as you build them ────────────────────────────────
-from app.api.v1.endpoints import auth,agents,employees,services,business_hours,availability,appointments,customers,twilio_webhook,chat
+from app.api.v1.endpoints import auth,agents,employees,services,business_hours,availability,appointments,customers,twilio_webhook,chat,voice
 # from app.api.v1.endpoints import auth, businesses, agents, employees
 # from app.api.v1.endpoints import services, appointments, customers, availability
 # from app.api.v1.endpoints import twilio_webhook
@@ -101,7 +101,8 @@ def create_app() -> FastAPI:
     app.include_router(customers.router,    prefix="/api/v1/customers",    tags=["Customers"])
     app.include_router(availability.router, prefix="/api/v1/availability", tags=["Availability"])
     app.include_router(twilio_webhook.router, prefix="/api/v1/twilio",     tags=["Twilio"])
-    app.include_router(chat.router , prefix="/api/v1/twilio",     tags=["chat"])
+    app.include_router(chat.router , prefix="/api/v1/chat",     tags=["chat"])
+    app.include_router(voice.router,            prefix="/api/v1/voice",        tags=["Voice"])
     # ── Health check ──────────────────────────────────────────────────────
     @app.get("/health", tags=["Health"])
     def health_check():
