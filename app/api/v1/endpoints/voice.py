@@ -40,7 +40,7 @@ Phone number extraction note:
     event types (e.g. conversation-update, function-call), so we check both
     locations and fall back gracefully.
 """
-
+import json
 from fastapi import APIRouter, Depends, Request, Header
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -51,7 +51,7 @@ from app.db.session import get_db
 from app.core.config import settings
 from app.services.voice_service import (
     build_vapi_assistant_config,
-    handle_incoming_voice,
+    handle_vapi_tool_call,
     get_agent_by_phone,
     _build_fallback_config,
 )
@@ -90,7 +90,7 @@ async def vapi_config(
     """
 
     # validate Vapi secret in production
-    _validate_vapi_secret(x_vapi_secret)
+    _log_vapi_secret(x_vapi_secret)
 
     try:
         body = await request.json()
@@ -153,13 +153,15 @@ async def vapi_config(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ENDPOINT 2 — main webhook (conversation updates + tool calls)
+# ENDPOINT 2 — webhook (tool calls only)
+# Vapi calls this when the LLM wants to execute a tool
+# We do NOT handle conversation turns here — Vapi owns those
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post(
     "/vapi/webhook",
     status_code=200,
-    summary="Handle Vapi call events — transcripts and tool calls",
+    summary="Handle Vapi tool call requests",
     include_in_schema=settings.DEBUG,
 )
 async def vapi_webhook(
@@ -168,25 +170,25 @@ async def vapi_webhook(
     x_vapi_secret: Optional[str] = Header(None),
 ):
     """
-    Called by Vapi during the call with message events.
+    Called by Vapi when the LLM wants to execute a server tool.
 
-    We handle three event types:
-        conversation-update → customer spoke, run AI, return spoken response
-        function-call       → AI wants a tool result, execute and return
-        end-of-call-report  → call ended, log the summary
+    The LLM runs entirely on Vapi's side. When it decides to call
+    a tool (check availability, book appointment, etc.), Vapi sends
+    a function-call webhook here. We execute the tool and return
+    the result. Vapi feeds the result back into the conversation.
 
-    All other event types (transcript, speech-update, status-update etc) are
-    acknowledged but not processed — they're real-time events we don't need
-    to act on. We always return 200 for these so Vapi doesn't retry.
-
-    Response format for conversation-update:
-        {"response": "The text for Vapi to speak"}
+    We also handle:
+        end-of-call-report → log call summary
+        all other events   → acknowledge and ignore
 
     Response format for function-call:
-        {"result": "JSON string of the tool result"}
+        {"result": "json string of the tool result"}
+
+    Must respond within 20 seconds or Vapi times out.
+    Must always return 200 — errors break the call.
     """
 
-    _validate_vapi_secret(x_vapi_secret)
+    _log_vapi_secret(x_vapi_secret)
 
     try:
         body = await request.json()
@@ -196,12 +198,8 @@ async def vapi_webhook(
         logger.info(f"Vapi webhook: type={message_type}")
         logger.debug(f"Vapi webhook payload: {body}")
 
-        # ── conversation-update — customer spoke ───────────────────────
-        if message_type == "conversation-update":
-            return await _handle_conversation_update(db, message)
-
-        # ── function-call — AI wants to use a tool ────────────────────
-        elif message_type == "function-call":
+        # ── function-call — LLM wants to execute a tool ───────────────
+        if message_type in ("function-call", "tool-calls"):
             return await _handle_function_call(db, message)
 
         # ── end-of-call-report — call finished ────────────────────────
@@ -209,27 +207,24 @@ async def vapi_webhook(
             _handle_end_of_call(message)
             return JSONResponse(content={"status": "ok"})
 
-        # ── all other events — acknowledge and ignore ──────────────────
-        # Vapi sends many event types we don't act on:
-        #   transcript      → real-time partial transcript chunks
-        #   speech-update   → speaker started / stopped speaking
-        #   status-update   → call lifecycle (ringing, in-progress, etc.)
-        #   hang             → caller hung up
-        # We must return 200 for all of them or Vapi will retry.
+        # ── all other events — acknowledge, ignore ─────────────────────
+        # We do NOT handle conversation-update here.
+        # The LLM runs on Vapi — conversation turns are theirs to manage.
         else:
-            logger.debug(f"Vapi webhook: ignoring event type '{message_type}'")
+            logger.debug(f"Vapi webhook: ignoring '{message_type}' — Vapi handles this")
             return JSONResponse(content={"status": "ok"})
 
     except Exception as e:
-        logger.exception(f"Error in Vapi webhook: {e}")
+        logger.exception(f"Vapi webhook error: {e}")
+        # return 200 with error in result — never let Vapi get a non-200
         return JSONResponse(
-            content={"response": "I'm sorry, I encountered a technical issue. Please try again."},
-            status_code=200,    # always 200 — Vapi needs a valid response
+            content={"result": json.dumps({"error": "Internal server error"})},
+            status_code=200,
         )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ENDPOINT 3 — status updates (call lifecycle)
+# ENDPOINT 3 — status updates (call lifecycle logging)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post(
@@ -245,19 +240,12 @@ async def vapi_status(
     """
     Called by Vapi for call lifecycle events.
 
-    Events we log:
-        queued        → call is queued
-        ringing       → phone is ringing
-        in-progress   → call connected
-        forwarding    → call being forwarded
-        ended         → call ended normally
-        failed        → call failed
-
-    We log these for analytics and debugging.
-    Always returns 200 immediately — no processing needed.
+    Events: queued, ringing, in-progress, forwarding, ended, failed.
+    We log them for analytics and debugging.
+    Always returns 200 immediately.
     """
 
-    _validate_vapi_secret(x_vapi_secret)
+    _log_vapi_secret(x_vapi_secret)
 
     try:
         body = await request.json()
@@ -265,36 +253,19 @@ async def vapi_status(
         status = message.get("status", "unknown")
         call = message.get("call", {})
         call_id = call.get("id", "unknown")
+        to_number = call.get("toNumber", "unknown")
+        from_number = call.get("fromNumber", "unknown")
 
-        # FIX: phone numbers in status-update events live in the call object,
-        # but also check phoneNumber/customer objects as a fallback for consistency
-        phone_number_obj = message.get("phoneNumber", {})
-        customer_obj = message.get("customer", {})
-
-        to_number = (
-            call.get("toNumber") or
-            call.get("to") or
-            phone_number_obj.get("number") or
-            "unknown"
-        )
-        from_number = (
-            call.get("fromNumber") or
-            call.get("from") or
-            customer_obj.get("number") or
-            "unknown"
-        )
-
-        # log based on status
         if status in ("ended", "failed"):
             end_reason = message.get("endedReason", "unknown")
             duration = call.get("duration", 0)
             logger.info(
-                f"Vapi call {status}: call={call_id} to={to_number} "
+                f"Vapi call {status}: id={call_id} to={to_number} "
                 f"from={from_number} reason={end_reason} duration={duration}s"
             )
         else:
             logger.info(
-                f"Vapi call status '{status}': call={call_id} "
+                f"Vapi call status '{status}': id={call_id} "
                 f"to={to_number} from={from_number}"
             )
 
@@ -305,223 +276,158 @@ async def vapi_status(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# INTERNAL EVENT HANDLERS
+# INTERNAL — function call handler
 # ─────────────────────────────────────────────────────────────────────────────
-
-async def _handle_conversation_update(db: Session, message: dict) -> JSONResponse:
-    """
-    Handle a conversation-update event.
-
-    Extracts the latest customer message from the transcript,
-    runs the AI agent with the full conversation context,
-    and returns the spoken response.
-
-    Args:
-        db:      database session
-        message: the message dict from the Vapi payload
-
-    Returns:
-        JSONResponse with {"response": "text to speak"}
-    """
-
-    call = message.get("call", {})
-    call_id = call.get("id", "unknown")
-
-    # FIX: phone numbers in conversation-update events may be in the call
-    # object OR in the top-level phoneNumber/customer objects — check both
-    phone_number_obj = message.get("phoneNumber", {})
-    customer_obj = message.get("customer", {})
-
-    to_number = (
-        call.get("toNumber") or
-        call.get("to") or
-        phone_number_obj.get("number") or
-        ""
-    )
-    from_number = (
-        call.get("fromNumber") or
-        call.get("from") or
-        customer_obj.get("number") or
-        ""
-    )
-
-    # extract the latest user message from the messages array
-    messages = message.get("messages", [])
-    customer_message = _extract_latest_user_message(messages)
-
-    if not customer_message:
-        logger.debug(f"Vapi conversation-update with no new user message — skipping")
-        return JSONResponse(content={"status": "ok"})
-
-    logger.info(
-        f"Vapi conversation update: call={call_id} to={to_number} "
-        f"from={from_number} customer said: '{customer_message[:60]}'"
-    )
-
-    reply = handle_incoming_voice(
-        db=db,
-        to_number=to_number,
-        from_number=from_number,
-        customer_message=customer_message,
-        call_id=call_id,
-    )
-
-    return JSONResponse(content={"response": reply})
-
 
 async def _handle_function_call(db: Session, message: dict) -> JSONResponse:
     """
-    Handle a function-call event (server-side tool call).
+    Execute a tool call sent by Vapi when the LLM wants a tool result.
 
-    When Vapi is configured with server-side tools, the AI model
-    requests tool execution via webhook instead of running it locally.
-    We execute the tool and return the result.
+    Extracts context from call metadata (agent_id, business_id, customer_id)
+    then calls handle_vapi_tool_call which routes to execute_tool.
 
     Args:
         db:      database session
-        message: the message dict from the Vapi payload
+        message: the message dict from the Vapi webhook payload
 
     Returns:
         JSONResponse with {"result": "json string"}
     """
 
-    from app.services.ai_tools import execute_tool
-    import json
-
     call = message.get("call", {})
     call_id = call.get("id", "unknown")
 
-    # FIX: same phone number extraction fix as the other handlers —
-    # check both call object and top-level phoneNumber/customer objects
-    phone_number_obj = message.get("phoneNumber", {})
-    customer_obj = message.get("customer", {})
-
-    to_number = (
-        call.get("toNumber") or
-        call.get("to") or
-        phone_number_obj.get("number") or
-        ""
-    )
-    from_number = (
-        call.get("fromNumber") or
-        call.get("from") or
-        customer_obj.get("number") or
-        ""
-    )
+    # ── Extract tool name, input, and toolCallId ──────────────────────────
+    tool_name = ""
+    tool_input = {}
+    tool_call_id = "unknown"
 
     function_call = message.get("functionCall", {})
-    tool_name = function_call.get("name", "")
-    tool_input = function_call.get("parameters", {})
+    tool_call_list = message.get("toolCallList", [])
 
-    logger.info(
-        f"Vapi function call: call={call_id} tool={tool_name} "
-        f"to={to_number} from={from_number}"
+    if function_call:
+        tool_name = function_call.get("name", "")
+        tool_input = function_call.get("parameters", {})
+        tool_call_id = function_call.get("id", "unknown")
+    elif tool_call_list:
+        first = tool_call_list[0]
+        tool_call_id = first.get("id", "unknown")
+        fn = first.get("function", {})
+        tool_name = fn.get("name", "")
+        raw_args = fn.get("arguments", {})
+        if isinstance(raw_args, str):
+            try:
+                tool_input = json.loads(raw_args)
+            except json.JSONDecodeError:
+                tool_input = {}
+        else:
+            tool_input = raw_args
+
+    logger.info(f"Vapi function call: call={call_id} tool={tool_name} toolCallId={tool_call_id}")
+    logger.debug(f"Tool input: {tool_input}")
+
+    # ── Extract metadata ───────────────────────────────────────────────────
+    # Vapi puts assistant metadata at call.assistant.metadata in webhooks,
+    # NOT at call.metadata — check both locations.
+    metadata = (
+        call.get("assistant", {}).get("metadata")
+        or call.get("metadata")
+        or {}
     )
 
-    agent = get_agent_by_phone(db, to_number)
-    if not agent:
-        logger.warning(f"Vapi function call: no agent found for number {to_number}")
-        return JSONResponse(content={"result": json.dumps({"error": "Agent not found"})})
+    logger.debug(f"Metadata resolved: {metadata}")
 
-    from app.services import customer_service
-    customer = customer_service.get_or_create_customer(
-        db=db,
-        phone=from_number,
-        name=f"Caller {from_number}",
-        business_id=agent.business_id,
+    agent_id = metadata.get("agent_id")
+    business_id = metadata.get("business_id")
+    customer_id = metadata.get("customer_id")
+
+    # phone number can be in several places depending on Vapi event type
+    customer_phone = (
+        metadata.get("customer_phone")
+        or call.get("customer", {}).get("number")
+        or call.get("fromNumber")
+        or ""
     )
 
-    result = execute_tool(
+    # ── Agent lookup fallback if metadata was missing ──────────────────────
+    if not agent_id:
+        to_number = (
+            call.get("phoneNumber", {}).get("number")
+            or call.get("toNumber")
+            or ""
+        )
+        logger.warning(f"Metadata missing agent_id — falling back to phone lookup: {to_number}")
+        agent = get_agent_by_phone(db, to_number)
+        if not agent:
+            logger.error(
+                f"Tool call: no agent found. call={call_id} to_number={to_number!r} "
+                f"call keys={list(call.keys())} metadata={metadata}"
+            )
+            return JSONResponse(content={
+                "results": [{"toolCallId": tool_call_id, "result": "Error: agent not found"}]
+            })
+        agent_id = agent.id
+        business_id = agent.business_id
+
+    result = handle_vapi_tool_call(
         db=db,
-        agent=agent,
-        customer=customer,
+        agent_id=agent_id,
+        business_id=business_id,
+        customer_id=customer_id,
+        customer_phone=customer_phone,
         tool_name=tool_name,
         tool_input=tool_input,
     )
 
-    return JSONResponse(content={"result": json.dumps(result, default=str)})
+    logger.debug(f"Tool result for '{tool_name}': {result}")
+
+    # Vapi requires this exact format
+    return JSONResponse(content={
+        "results": [
+            {
+                "toolCallId": tool_call_id,
+                "result": json.dumps(result, default=str),
+            }
+        ]
+    })
 
 
 def _handle_end_of_call(message: dict) -> None:
-    """
-    Log end-of-call summary for analytics.
-
-    Args:
-        message: the message dict from the Vapi payload
-    """
+    """Log end-of-call summary."""
 
     call = message.get("call", {})
     call_id = call.get("id", "unknown")
-    summary = message.get("summary", "No summary available")
+    summary = message.get("summary", "No summary")
     duration = call.get("duration", 0)
     end_reason = message.get("endedReason", "unknown")
     recording_url = message.get("recordingUrl")
 
     logger.info(
-        f"Vapi call ended: id={call_id} duration={duration}s "
-        f"reason={end_reason}"
+        f"Call ended: id={call_id} duration={duration}s reason={end_reason}"
     )
     logger.info(f"Call summary: {summary}")
 
     if recording_url:
-        logger.info(f"Recording available: {recording_url}")
+        logger.info(f"Recording: {recording_url}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UTILITIES
+# SECURITY HELPER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _extract_latest_user_message(messages: list) -> Optional[str]:
+def _log_vapi_secret(secret: Optional[str]) -> None:
     """
-    Extract the most recent user message from the Vapi messages array.
-
-    Vapi sends the full conversation history in each webhook.
-    We only need the latest user message — everything before it
-    is already in our ConversationLog.
-
-    Args:
-        messages: list of message dicts from Vapi
-
-    Returns:
-        str — the latest user message, or None if not found
-    """
-
-    # iterate in reverse to find the last user message
-    for msg in reversed(messages):
-        role = msg.get("role", "")
-        # Vapi uses both "message" and "content" depending on version
-        content = msg.get("message") or msg.get("content") or ""
-
-        if role == "user" and content.strip():
-            return content.strip()
-
-    return None
-
-
-def _validate_vapi_secret(secret: Optional[str]) -> None:
-    """
-    Validate the Vapi webhook secret header.
-
-    In production we check x-vapi-secret matches our VAPI_API_KEY.
-    In development we skip validation if VAPI_API_KEY is not set.
-
-    Args:
-        secret: value from x-vapi-secret header
-
-    Raises:
-        Nothing — logs warning but doesn't block the request.
-        Vapi requires 200 responses so we can't return 403.
+    Log a warning if the Vapi secret doesn't match.
+    We log but don't reject — Vapi requires 200 responses.
+    In a stricter setup you could raise HTTPException here.
     """
 
     if not settings.VAPI_API_KEY:
-        # development — skip validation
-        return
+        return  # development — skip validation
 
     if secret != settings.VAPI_API_KEY:
         logger.warning(
-            f"Vapi webhook secret mismatch — "
-            f"expected {settings.VAPI_API_KEY[:4]}... "
-            f"got {str(secret)[:4] if secret else 'None'}..."
+            f"Vapi secret mismatch — "
+            f"expected ...{settings.VAPI_API_KEY[-4:]} "
+            f"got ...{str(secret)[-4:] if secret else 'None'}"
         )
-        # we log but don't reject — Vapi needs 200 responses
-        # in a stricter setup you could raise HTTPException here

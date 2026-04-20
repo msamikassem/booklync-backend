@@ -95,12 +95,11 @@ TOOLS = [
                     "type": "integer",
                     "description": "The ID of the service.",
                 },
-                "start_time_utc": {
+                "start_time": {
                     "type": "string",
                     "description": (
-                        "The requested start time in UTC ISO 8601 format "
+                        "The requested start time in UTC format"
                         "e.g. '2025-07-01T14:00:00+00:00'. "
-                        "Convert the customer's local time to UTC using the branch timezone."
                     ),
                 },
                 "employee_id": {
@@ -108,7 +107,7 @@ TOOLS = [
                     "description": "Optional. Specific employee preference.",
                 },
             },
-            "required": ["service_id", "start_time_utc"],
+            "required": ["service_id", "start_time"],
         },
     },
     {
@@ -130,11 +129,10 @@ TOOLS = [
                     "type": "integer",
                     "description": "The ID of the employee to book with.",
                 },
-                "start_time_utc": {
+                "start_time": {
                     "type": "string",
                     "description": (
-                        "Appointment start time in UTC ISO 8601. "
-                        "Use start_time_utc from the availability result."
+                        "Appointment start time . "
                     ),
                 },
                 "note": {
@@ -142,7 +140,7 @@ TOOLS = [
                     "description": "Optional note e.g. customer preferences or special requests.",
                 },
             },
-            "required": ["service_id", "employee_id", "start_time_utc"],
+            "required": ["service_id", "employee_id", "start_time"],
         },
     },
     {
@@ -331,7 +329,7 @@ def _tool_check_availability(db: Session, agent, tool_input: dict) -> dict:
     return {
         "service_name": result.service_name,
         "duration_minutes": result.duration_minutes,
-        "timezone": result.timezone,
+        "timezone": agent.timezone,
         "date": result.date.isoformat(),
         "total_slots": result.total_slots,
         "available_slots": [
@@ -340,7 +338,7 @@ def _tool_check_availability(db: Session, agent, tool_input: dict) -> dict:
                 "employee_name": s.employee_name,
                 "start_time": s.start_time.isoformat(),         # local
                 "end_time": s.end_time.isoformat(),             # local
-                "start_time_utc": s.start_time_utc.isoformat(), # use for booking
+                "start_time": s.start_time.isoformat(), # use for booking
             }
             for s in result.available_slots
         ],
@@ -350,7 +348,7 @@ def _tool_check_availability(db: Session, agent, tool_input: dict) -> dict:
 def _tool_check_specific_slot(db: Session, agent, tool_input: dict) -> dict:
     from app.services.availability_service import check_slot
 
-    requested_start = datetime.fromisoformat(tool_input["start_time_utc"])
+    requested_start = datetime.fromisoformat(tool_input["start_time"])
     result = check_slot(
         db=db,
         agent_id=agent.id,
@@ -361,14 +359,14 @@ def _tool_check_specific_slot(db: Session, agent, tool_input: dict) -> dict:
     )
     return {
         "available": result.available,
-        "timezone": result.timezone,
+        "timezone": agent.timezone,
         "requested_start": result.requested_start.isoformat(),
         "slots": [
             {
                 "employee_id": s.employee_id,
                 "employee_name": s.employee_name,
                 "start_time": s.start_time.isoformat(),
-                "start_time_utc": s.start_time_utc.isoformat(),
+                "start_time": s.start_time.isoformat(),
             }
             for s in result.slots
         ],
@@ -377,7 +375,7 @@ def _tool_check_specific_slot(db: Session, agent, tool_input: dict) -> dict:
                 "employee_id": s.employee_id,
                 "employee_name": s.employee_name,
                 "start_time": s.start_time.isoformat(),
-                "start_time_utc": s.start_time_utc.isoformat(),
+                "start_time": s.start_time.isoformat(),
             }
             for s in result.closest_before
         ],
@@ -386,7 +384,7 @@ def _tool_check_specific_slot(db: Session, agent, tool_input: dict) -> dict:
                 "employee_id": s.employee_id,
                 "employee_name": s.employee_name,
                 "start_time": s.start_time.isoformat(),
-                "start_time_utc": s.start_time_utc.isoformat(),
+                "start_time": s.start_time.isoformat(),
             }
             for s in result.closest_after
         ],
@@ -397,7 +395,7 @@ def _tool_create_appointment(db: Session, agent, customer, tool_input: dict) -> 
     from app.services import appointment_service
     from app.schemas.appointment import AppointmentCreate, AppointmentSourceEnum
 
-    start_time = datetime.fromisoformat(tool_input["start_time_utc"])
+    start_time = datetime.fromisoformat(tool_input["start_time"])
 
     data = AppointmentCreate(
         agent_id=agent.id,
@@ -405,7 +403,7 @@ def _tool_create_appointment(db: Session, agent, customer, tool_input: dict) -> 
         employee_id=tool_input["employee_id"],
         service_id=tool_input["service_id"],
         start_time=start_time,
-        source=AppointmentSourceEnum.ai,
+        source=AppointmentSourceEnum.sms,
         note=tool_input.get("note"),
     )
 
