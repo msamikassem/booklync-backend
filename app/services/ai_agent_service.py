@@ -24,6 +24,7 @@ from app.core.config import settings
 from app.core.exceptions import NotFoundException
 from app.services import customer_service
 from app.services.ai_tools import TOOLS, execute_tool
+from app.utils.twilio_utils import send_sms
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -35,17 +36,17 @@ def handle_incoming_sms(
     to_number: str,
     from_number: str,
     message_body: str,
-) -> str:
+) -> str | None:
     """
     Main entry point for incoming SMS messages.
 
     1. Find agent by Twilio number
     2. Get or create customer
     3. Load or create conversation
-    4. Append user message
-    5. Run AI with tools
-    6. Save updated conversation
-    7. Return AI reply
+    4. Send welcome message on first contact (if configured)
+       - If post_welcome_behavior is 'silent', stop here
+    5. If silent mode on follow-up messages, do nothing
+    6. Otherwise append user message, run AI, save and return reply
 
     Args:
         db:           database session
@@ -55,6 +56,7 @@ def handle_incoming_sms(
 
     Returns:
         str — the AI's reply to send back via SMS
+        None — if silent mode, no reply should be sent
     """
 
     logger.info(f"Incoming SMS: from={from_number} to={to_number} body='{message_body[:50]}'")
@@ -73,13 +75,46 @@ def handle_incoming_sms(
     customer = customer_service.get_or_create_customer(
         db=db,
         phone=from_number,
-        name=f"Customer {from_number}",
+        name=None,
         business_id=agent.business_id,
     )
 
     # get or create conversation
     conversation_log = _get_or_create_conversation(db, agent, customer)
     messages = conversation_log.messages or []
+
+    is_first_message = len(messages) == 0
+
+    # ── Welcome message ───────────────────────────────────────────────────
+    # On first contact, send the configured welcome message if one is set.
+    # If post_welcome_behavior is 'silent', save the exchange and stop —
+    # no AI involved, no further replies will be sent.
+    if is_first_message and agent.sms_welcome_message:
+        send_sms(
+            to=from_number,
+            body=agent.sms_welcome_message,
+            from_number=to_number,
+        )
+
+        if agent.sms_post_welcome_behavior == "silent":
+            messages.append({"role": "user", "content": message_body, "ts": datetime.utcnow().isoformat()})
+            messages.append({"role": "assistant", "content": agent.sms_welcome_message, "ts": datetime.utcnow().isoformat()})
+
+            from sqlalchemy.orm.attributes import flag_modified
+            conversation_log.messages = messages
+            flag_modified(conversation_log, "messages")
+            db.add(conversation_log)
+            db.commit()
+
+            logger.info(f"Welcome message sent to {from_number}, silent mode — stopping here.")
+            return None
+
+    # ── Silent mode follow-up ─────────────────────────────────────────────
+    # If this is not the first message but the agent is set to silent,
+    # ignore all further messages — no reply sent.
+    if not is_first_message and agent.sms_post_welcome_behavior == "silent":
+        logger.info(f"Silent mode — ignoring follow-up message from {from_number}")
+        return None
 
     # append user message
     messages.append({
@@ -123,7 +158,6 @@ def handle_incoming_sms(
     logger.info(f"AI reply for customer {customer.id}: '{ai_response[:100]}'")
 
     return ai_response
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AI RUNNER — detects provider and runs the tool use loop

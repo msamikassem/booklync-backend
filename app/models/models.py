@@ -119,6 +119,8 @@ class AIAgent(Base):
     # Store IANA timezone strings (e.g. "America/New_York").
     timezone      = Column(Text, nullable=False)
     model         = Column(Text, nullable=False)
+    sms_welcome_message       = Column(Text, nullable=True)
+    sms_post_welcome_behavior = Column(Text, nullable=True, default="ai")
     active        = Column(Boolean, default=False, nullable=False)
     created_at    = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -334,7 +336,7 @@ class Customer(Base):
 
     id          = Column(Integer, primary_key=True, autoincrement=True)
     business_id = Column(Integer, ForeignKey("businesses.id"), nullable=False)
-    name        = Column(Text, nullable=False)
+    name        = Column(Text)
     phone       = Column(Text, nullable=False)
     email       = Column(Text)
     notes       = Column(Text)

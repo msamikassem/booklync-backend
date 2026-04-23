@@ -48,7 +48,7 @@ class ConversationHistoryResponse(BaseModel):
     agent_id: int
     agent_name: str
     customer_id: int
-    customer_name: str
+    customer_name: Optional[str] = None
     customer_phone: str
     channel: str
     messages: list[dict]

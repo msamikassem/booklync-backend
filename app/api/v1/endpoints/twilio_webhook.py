@@ -94,13 +94,14 @@ async def receive_sms(
         )
 
         # Send the AI's reply back to the customer
-        send_sms(
-            to=from_number,
-            body=ai_reply,
-            from_number=to_number,    # reply from the same number they texted
-        )
+        if ai_reply is not None:
+            send_sms(
+                to=from_number,
+                body=ai_reply,
+                from_number=to_number,    # reply from the same number they texted
+            )
 
-        logger.info(f"SMS replied: to={from_number} preview='{ai_reply[:50]}...'")
+            logger.info(f"SMS replied: to={from_number} preview='{ai_reply[:50]}...'")
 
     except Exception as e:
         logger.exception(f"Error handling SMS from {From}: {e}")

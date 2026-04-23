@@ -29,6 +29,8 @@ class AgentCreate(BaseModel):
     location_name: str
     timezone: str           # IANA timezone string e.g. "America/New_York"
     model: str              # AI model to use e.g. "claude-sonnet-4-20250514"
+    sms_welcome_message: Optional[str] = None
+    sms_post_welcome_behavior: Optional[str] = "ai"
 
     @field_validator("agent_name")
     @classmethod
@@ -57,6 +59,13 @@ class AgentCreate(BaseModel):
         if not value.strip():
             raise ValueError("Location name cannot be empty")
         return value.strip()
+    
+    @field_validator("sms_post_welcome_behavior")  # 👈
+    @classmethod
+    def validate_post_welcome_behavior(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and value not in ("ai", "silent"):
+            raise ValueError("sms_post_welcome_behavior must be 'ai' or 'silent'")
+        return value
 
 
 class AgentUpdate(BaseModel):
@@ -70,6 +79,8 @@ class AgentUpdate(BaseModel):
     location_name: Optional[str] = None
     timezone: Optional[str] = None
     model: Optional[str] = None
+    sms_welcome_message: Optional[str] = None
+    sms_post_welcome_behavior: Optional[str] = None
 
     @field_validator("agent_name")
     @classmethod
@@ -84,6 +95,13 @@ class AgentUpdate(BaseModel):
         if value is not None and not value.strip():
             raise ValueError("Phone number cannot be empty")
         return value.strip() if value else value
+    
+    @field_validator("sms_post_welcome_behavior")  # 👈
+    @classmethod
+    def validate_post_welcome_behavior(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and value not in ("ai", "silent"):
+            raise ValueError("sms_post_welcome_behavior must be 'ai' or 'silent'")
+        return value
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -101,6 +119,8 @@ class AgentResponse(BaseModel):
     location_name: str
     timezone: str
     model: str
+    sms_welcome_message: Optional[str] = None
+    sms_post_welcome_behavior: Optional[str] = None
     active: bool
     created_at: datetime
 

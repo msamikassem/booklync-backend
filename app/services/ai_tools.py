@@ -174,6 +174,28 @@ TOOLS = [
             "required": ["appointment_id"],
         },
     },
+    {
+        "name": "update_customer_info",
+        "description": (
+            "Update the current customer's name or email. "
+            "Call this as soon as the customer tells you their name — do not wait until the end of the call. "
+            "Also call this if the customer corrects their name or provides an email address."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The customer's full name as they said it.",
+                },
+                "email": {
+                    "type": "string",
+                    "description": "The customer's email address (optional).",
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -263,6 +285,10 @@ def _route_tool(
     elif tool_name == "cancel_appointment":
         return _tool_cancel_appointment(db, agent, tool_input)
 
+    # ── update_customer_info ──────────────────────────────────────────────
+    elif tool_name == "update_customer_info":
+        return _tool_update_customer_info(db, agent, customer, tool_input)
+
     else:
         logger.warning(f"Unknown tool requested: {tool_name}")
         return {"error": f"Unknown tool: {tool_name}"}
@@ -272,6 +298,7 @@ def _route_tool(
 # INDIVIDUAL TOOL IMPLEMENTATIONS
 # Each function handles one tool — clean and easy to modify independently.
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _tool_get_current_time(db: Session, agent) -> dict:
     from app.services.availability_service import get_agent_time
@@ -463,4 +490,39 @@ def _tool_cancel_appointment(db: Session, agent, tool_input: dict) -> dict:
         "service_name": result["service_name"],
         "status": result["status"],
         "message": "Appointment cancelled successfully",
+    }
+
+
+def _tool_update_customer_info(db: Session, agent, customer, tool_input: dict) -> dict:
+    """
+    Update the customer's name and/or email.
+    Called by the AI as soon as the customer says their name.
+    """
+    from app.schemas.customer import CustomerUpdate
+    from app.services import customer_service
+
+    name = tool_input.get("name")
+    email = tool_input.get("email")
+
+    if not name and not email:
+        return {"success": False, "message": "No fields provided to update."}
+
+    update_data = CustomerUpdate(
+        name=name if name else None,
+        email=email if email else None,
+    )
+
+    updated = customer_service.update_customer(
+        db=db,
+        customer_id=customer.id,
+        data=update_data,
+        business_id=agent.business_id,
+    )
+
+    logger.info(f"Customer info updated via AI: id={customer.id} name={updated.name}")
+
+    return {
+        "success": True,
+        "name": updated.name,
+        "message": "Customer info updated.",
     }

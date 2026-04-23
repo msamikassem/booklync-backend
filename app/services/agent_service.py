@@ -66,6 +66,8 @@ def create_agent(db: Session, data: AgentCreate, business_id: int) -> AIAgent:
         location_name=data.location_name,
         timezone=data.timezone,
         model=data.model,
+        sms_welcome_message=data.sms_welcome_message,
+        sms_post_welcome_behavior=data.sms_post_welcome_behavior, 
         active=False,    # agents start inactive until configured and ready
     )
 
