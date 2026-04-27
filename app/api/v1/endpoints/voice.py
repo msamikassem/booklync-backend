@@ -47,6 +47,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 from loguru import logger
 
+from app.models.models import AIAgent
 from app.db.session import get_db
 from app.core.config import settings
 from app.services.voice_service import (
@@ -204,7 +205,7 @@ async def vapi_webhook(
 
         # ── end-of-call-report — call finished ────────────────────────
         elif message_type == "end-of-call-report":
-            _handle_end_of_call(message)
+            _handle_end_of_call(db,message)
             return JSONResponse(content={"status": "ok"})
 
         # ── all other events — acknowledge, ignore ─────────────────────
@@ -392,23 +393,40 @@ async def _handle_function_call(db: Session, message: dict) -> JSONResponse:
     })
 
 
-def _handle_end_of_call(message: dict) -> None:
-    """Log end-of-call summary."""
+def _handle_end_of_call(db: Session, message: dict) -> None:
+    """Log end-of-call summary and update agent minutes_used."""
 
     call = message.get("call", {})
     call_id = call.get("id", "unknown")
     summary = message.get("summary", "No summary")
-    duration = call.get("duration", 0)
     end_reason = message.get("endedReason", "unknown")
     recording_url = message.get("recordingUrl")
 
-    logger.info(
-        f"Call ended: id={call_id} duration={duration}s reason={end_reason}"
-    )
+    # durationMinutes comes directly from the end-of-call-report payload
+    duration_minutes = message.get("durationMinutes", 0) or 0
+
+    logger.info(f"Call ended: id={call_id} duration={duration_minutes}min reason={end_reason}")
     logger.info(f"Call summary: {summary}")
 
     if recording_url:
         logger.info(f"Recording: {recording_url}")
+
+    # ── Update agent minutes_used ──────────────────────────────────────────
+    agent_id = call.get("assistant", {}).get("metadata", {}).get("agent_id")
+
+    if agent_id and duration_minutes > 0:
+        try:
+            agent = db.query(AIAgent).filter(AIAgent.id == agent_id).first()
+            if agent:
+                # SQLAlchemy line to increment minutes_used
+                agent.minutes_used = (agent.minutes_used or 0) + duration_minutes
+                db.commit()
+                logger.info(f"Agent {agent_id} minutes_used updated: +{duration_minutes:.3f}min (total={agent.minutes_used:.3f})")
+            else:
+                logger.warning(f"End-of-call: no agent found for id={agent_id}")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to update agent minutes_used: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@ Time handling rules:
 Creating an appointment runs overlap check first — never double-books.
 end_time is always calculated from service duration — never sent by caller.
 """
-
+from app.services.notification_service import send_appointment_notification,send_cancellation,send_confirmation,send_custom,send_no_show_followup
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -251,6 +251,14 @@ def create_appointment(
     db.commit()
     db.refresh(appointment)
 
+    # send confirmation SMS immediately after booking
+    try:
+        from app.services.notification_service import send_confirmation
+        send_confirmation(db, appointment.id)
+    except Exception as e:
+        # never let notification failure break the booking
+        logger.warning(f"Confirmation SMS failed for appointment {appointment.id}: {e}")
+
     logger.info(
         f"Appointment created: id={appointment.id} "
         f"customer='{customer.name}' employee='{employee.name}' "
@@ -403,6 +411,13 @@ def update_appointment(
 
     db.commit()
     db.refresh(appointment)
+    # send reschedule SMS if time or employee changed
+    if data.start_time or data.employee_id:
+        try:
+            from app.services.notification_service import send_reschedule
+            send_reschedule(db, appointment.id)
+        except Exception as e:
+            logger.warning(f"Reschedule SMS failed for appointment {appointment.id}: {e}")
 
     customer = db.query(Customer).filter(Customer.id == appointment.customer_id).first()
     employee = db.query(Employee).filter(Employee.id == appointment.employee_id).first()
@@ -438,6 +453,14 @@ def update_appointment_status(
     db.commit()
     db.refresh(appointment)
 
+    # send no-show follow-up if status was just set to no_show
+    if status == AppointmentStatusEnum.no_show:
+        try:
+            from app.services.notification_service import send_no_show_followup
+            send_no_show_followup(db, appointment.id)
+        except Exception as e:
+            logger.warning(f"No-show SMS failed for appointment {appointment.id}: {e}")
+
     customer = db.query(Customer).filter(Customer.id == appointment.customer_id).first()
     employee = db.query(Employee).filter(Employee.id == appointment.employee_id).first()
     service = db.query(Service).filter(Service.id == appointment.service_id).first() if appointment.service_id else None
@@ -453,10 +476,17 @@ def cancel_appointment(
     business_id: int,
 ) -> dict:
     """Cancel an appointment — shortcut for status update."""
+    # send cancellation SMS
+    try:
+        from app.services.notification_service import send_cancellation
+        send_cancellation(db, appointment_id)
+    except Exception as e:
+        logger.warning(f"Cancellation SMS failed for appointment {appointment_id}: {e}")
+
     return update_appointment_status(
         db, appointment_id, AppointmentStatusEnum.cancelled, business_id
     )
-
+    
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CUSTOMER HISTORY

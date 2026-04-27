@@ -23,7 +23,7 @@ class CustomerCreate(BaseModel):
     Used by: POST /api/v1/customers/
     phone is required — it is the primary identifier for AI agent lookups.
     """
-    name: str
+    name: Optional[str] = None
     phone: str
     email: Optional[str] = None
     notes: Optional[str] = None
@@ -76,7 +76,7 @@ class CustomerUpdate(BaseModel):
 class CustomerResponse(BaseModel):
     id: int
     business_id: int
-    name: str
+    name: Optional[str] = None
     phone: str
     email: Optional[str] = None
     notes: Optional[str] = None

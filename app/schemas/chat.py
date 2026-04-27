@@ -32,7 +32,7 @@ class ChatMessageResponse(BaseModel):
     """
     conversation_id: int
     customer_id: int
-    customer_name: str
+    customer_name: Optional[str] = None
     agent_id: int
     agent_name: str
     message_sent: str           # what the customer sent

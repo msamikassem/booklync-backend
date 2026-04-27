@@ -1,18 +1,10 @@
 """
 app/main.py
-
-FastAPI application factory.
-
-This file:
-  1. Creates the FastAPI app instance
-  2. Configures CORS (which frontends are allowed to call our API)
-  3. Registers all exception handlers
-  4. Mounts all API routers
-  5. Sets up startup / shutdown lifecycle events
 """
 
 from contextlib import asynccontextmanager
-
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -21,28 +13,74 @@ from loguru import logger
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import register_exception_handlers
+from app.db.session import SessionLocal
 
-# ── Routers — uncomment each as you build them ────────────────────────────────
-from app.api.v1.endpoints import auth,agents,employees,services,business_hours,availability,appointments,customers,twilio_webhook,chat,voice
-# from app.api.v1.endpoints import auth, businesses, agents, employees
-# from app.api.v1.endpoints import services, appointments, customers, availability
-# from app.api.v1.endpoints import twilio_webhook
+# import all routers
+from app.api.v1.endpoints import auth
+from app.api.v1.endpoints import agents
+from app.api.v1.endpoints import employees
+from app.api.v1.endpoints import services
+from app.api.v1.endpoints import business_hours
+from app.api.v1.endpoints import availability
+from app.api.v1.endpoints import customers
+from app.api.v1.endpoints import appointments
+from app.api.v1.endpoints import twilio_webhook
+from app.api.v1.endpoints import chat
+from app.api.v1.endpoints import voice
+from app.api.v1.endpoints import notifications   # ← new
 
 
-# ── Lifespan: runs on startup and shutdown ────────────────────────────────────
+# ── Scheduler instance ────────────────────────────────────────────────────────
+# Created here so it can be started and stopped in the lifespan function
+scheduler = BackgroundScheduler()
+
+
+def _run_reminder_job():
+    """
+    Wrapper function called by APScheduler every minute.
+
+    Creates its own database session because APScheduler runs in a
+    separate thread — it cannot share the request-scoped sessions
+    that FastAPI's get_db() provides.
+
+    Always closes the session in the finally block even if an error occurs.
+    """
+    from app.services.notification_service import run_reminder_check
+
+    db = SessionLocal()
+    try:
+        result = run_reminder_check(db)
+        if result["sent"] > 0:
+            logger.info(f"Scheduler: sent {result['sent']} reminders")
+    except Exception as e:
+        logger.exception(f"Scheduler: reminder job failed: {e}")
+    finally:
+        db.close()
+
+
+# ── Lifespan ──────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Code before `yield` runs on startup.
-    Code after `yield` runs on shutdown.
-    """
-    # Startup
     setup_logging()
     logger.info(f"Starting {settings.APP_NAME} — env={settings.APP_ENV}")
 
+    # ── Start scheduler ───────────────────────────────────────────────────
+    scheduler.add_job(
+        func=_run_reminder_job,
+        trigger=IntervalTrigger(minutes=1),   # runs every minute
+        id="reminder_check",
+        name="SMS Reminder Check",
+        replace_existing=True,
+        max_instances=1,    # never run two at the same time
+    )
+    scheduler.start()
+    logger.info("Scheduler started — reminder check every 1 minute")
+
     yield
 
-    # Shutdown
+    # ── Stop scheduler cleanly on shutdown ────────────────────────────────
+    scheduler.shutdown(wait=False)
+    logger.info("Scheduler stopped")
     logger.info(f"Shutting down {settings.APP_NAME}")
 
 
@@ -52,27 +90,20 @@ def create_app() -> FastAPI:
         title=settings.APP_NAME,
         version="1.0.0",
         description="AI-powered appointment booking platform API",
-        # Hide docs in production — never expose your API schema publicly
         docs_url="/docs" if settings.DEBUG else None,
         redoc_url="/redoc" if settings.DEBUG else None,
         openapi_url="/openapi.json" if settings.DEBUG else None,
         lifespan=lifespan,
     )
 
-    # ── CORS ──────────────────────────────────────────────────────────────
-    # Controls which origins (domains) are allowed to call the API.
-    # In production this should be ONLY your Next.js domain.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,
-        allow_credentials=True,       # allow cookies and auth headers
-        allow_methods=["*"],          # GET, POST, PUT, DELETE, etc.
-        allow_headers=["*"],          # Content-Type, Authorization, etc.
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
-    # ── Trusted host (production security) ────────────────────────────────
-    # Rejects requests with a Host header that doesn't match.
-    # Prevents HTTP Host header attacks.
     if not settings.DEBUG:
         app.add_middleware(
             TrustedHostMiddleware,
@@ -82,38 +113,26 @@ def create_app() -> FastAPI:
             ],
         )
 
-    # ── Exception handlers ────────────────────────────────────────────────
     register_exception_handlers(app)
 
-    # ── Routers ───────────────────────────────────────────────────────────
-    # All routes live under /api/v1/ — versioning from day one means
-    # you can release /api/v2/ later without breaking existing clients.
-    #
-    # Uncomment each router as you build the corresponding module:
-    #
-    app.include_router(auth.router,         prefix="/api/v1/auth",         tags=["Auth"])
-    # app.include_router(businesses.router,   prefix="/api/v1/businesses",   tags=["Businesses"])
-    app.include_router(agents.router,       prefix="/api/v1/agents",       tags=["Agents"])
-    app.include_router(employees.router,    prefix="/api/v1/employees",    tags=["Employees"])
-    app.include_router(services.router,     prefix="/api/v1/services",     tags=["Services"])
-    app.include_router(business_hours.router,     prefix="/api/v1/services",     tags=["business hours"])
-    app.include_router(appointments.router, prefix="/api/v1/appointments", tags=["Appointments"])
-    app.include_router(customers.router,    prefix="/api/v1/customers",    tags=["Customers"])
-    app.include_router(availability.router, prefix="/api/v1/availability", tags=["Availability"])
-    app.include_router(twilio_webhook.router, prefix="/api/v1/twilio",     tags=["Twilio"])
-    app.include_router(chat.router , prefix="/api/v1/chat",     tags=["chat"])
-    app.include_router(voice.router,            prefix="/api/v1/voice",        tags=["Voice"])
-    # ── Health check ──────────────────────────────────────────────────────
+    app.include_router(auth.router,             prefix="/api/v1/auth",          tags=["Auth"])
+    app.include_router(agents.router,           prefix="/api/v1/agents",        tags=["Agents"])
+    app.include_router(employees.router,        prefix="/api/v1/employees",     tags=["Employees"])
+    app.include_router(services.router,         prefix="/api/v1/services",      tags=["Services"])
+    app.include_router(business_hours.router,   prefix="/api/v1",               tags=["Business Hours"])
+    app.include_router(availability.router,     prefix="/api/v1/availability",  tags=["Availability"])
+    app.include_router(customers.router,        prefix="/api/v1/customers",     tags=["Customers"])
+    app.include_router(appointments.router,     prefix="/api/v1/appointments",  tags=["Appointments"])
+    app.include_router(twilio_webhook.router,   prefix="/api/v1/twilio",        tags=["Twilio"])
+    app.include_router(chat.router,             prefix="/api/v1/chat",          tags=["Chat"])
+    app.include_router(voice.router,            prefix="/api/v1/voice",         tags=["Voice"])
+    app.include_router(notifications.router,    prefix="/api/v1/notifications", tags=["Notifications"])
+
     @app.get("/health", tags=["Health"])
     def health_check():
-        """
-        Simple endpoint to verify the API is running.
-        Used by load balancers and monitoring tools.
-        """
         return {"status": "ok", "app": settings.APP_NAME, "env": settings.APP_ENV}
 
     return app
 
 
-# Create the app instance
 app = create_app()
