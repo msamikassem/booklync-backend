@@ -26,9 +26,9 @@ engine = create_engine(
     settings.DATABASE_URL,
     connect_args=_connect_args,
     pool_pre_ping=True,     # test connections before using them (handles dropped connections)
-    pool_size=10,           # number of persistent connections in the pool
-    max_overflow=20,        # extra connections allowed under high load
-    pool_recycle=3600,      # recycle connections after 1 hour (prevents stale connections)
+    pool_size=5,            # 5 per worker × 4 workers = 20 steady-state connections
+    max_overflow=5,         # burst headroom: 10 per worker × 4 workers = 40 max total (under 60 limit)
+    pool_recycle=1800,      # recycle every 30 min (Supabase idles out long-lived connections)
     echo=settings.DEBUG,    # log all SQL statements in development
 )
 
