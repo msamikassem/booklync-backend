@@ -28,7 +28,7 @@ class ServiceCreate(BaseModel):
     """
     agent_id: int
     name: str
-    description: str
+    description: Optional[str] = None
     duration_minutes: int
     price: Decimal
 
@@ -37,13 +37,6 @@ class ServiceCreate(BaseModel):
     def name_not_empty(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("Service name cannot be empty")
-        return value.strip()
-
-    @field_validator("description")
-    @classmethod
-    def description_not_empty(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Service description cannot be empty")
         return value.strip()
 
     @field_validator("duration_minutes")
@@ -111,7 +104,7 @@ class ServiceResponse(BaseModel):
     id: int
     agent_id: int
     name: str
-    description: str
+    description: Optional[str] = None
     duration_minutes: int
     price: Decimal
     active: bool

@@ -289,7 +289,7 @@ class Service(Base):
     id               = Column(Integer, primary_key=True, autoincrement=True)
     agent_id         = Column(Integer, ForeignKey("ai_agents.id"), nullable=False)
     name             = Column(Text, nullable=False)
-    description      = Column(Text, nullable=False)
+    description      = Column(Text, nullable=True)
     duration_minutes = Column(Integer, nullable=False)
     # Numeric (not DECIMAL alias) is the correct SQLAlchemy type for money.
     price            = Column(Numeric(10, 2), nullable=False)

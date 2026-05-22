@@ -5,6 +5,7 @@ Centralised settings — reads every value from the .env file.
 Access anywhere: from app.core.config import settings
 """
 
+from pydantic import computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 
@@ -49,16 +50,22 @@ class Settings(BaseSettings):
     LOG_FILE: str = "logs/app.log"
 
     # ── CORS ──────────────────────────────────────────────────────────────
+    @computed_field
     @property
     def CORS_ORIGINS(self) -> List[str]:
-        origins = [self.FRONTEND_URL]
-        if self.DEBUG:
-            origins += [
-                "http://localhost:3000",
-                "http://localhost:3001",
-                "http://127.0.0.1:3000",
-            ]
-        return origins
+        if not self.DEBUG:
+            return [self.FRONTEND_URL]
+        # Both localhost and 127.0.0.1 are listed — browsers treat them as
+        # different origins even though they resolve to the same address.
+        return [
+            self.FRONTEND_URL,
+            "http://localhost:5500",    # VS Code Live Server
+            "http://127.0.0.1:5500",
+            "http://localhost:8080",    # python -m http.server 8080
+            "http://127.0.0.1:8080",
+            "http://localhost:3000",    # future Next.js dev server
+            "http://127.0.0.1:3000",
+        ]
 
     model_config = SettingsConfigDict(
         env_file=".env",

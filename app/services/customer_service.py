@@ -75,8 +75,8 @@ def create_customer(
 def get_or_create_customer(
     db: Session,
     phone: str,
-    name: str,
     business_id: int,
+    name: Optional[str] = None,
     email: Optional[str] = None,
 ) -> Customer:
     """
