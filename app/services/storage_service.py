@@ -63,38 +63,45 @@ def _delete_from_local(url: str) -> None:
         file_path.unlink()
 
 
-# ── Supabase storage ──────────────────────────────────────────────────────────
+# ── Supabase storage (direct REST API via httpx — no SDK needed) ──────────────
 
-def _supabase_client():
-    from supabase import create_client
-    return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
+def _sb_headers(content_type: str | None = None) -> dict:
+    h = {
+        "Authorization": f"Bearer {settings.SUPABASE_SERVICE_KEY}",
+        "apikey": settings.SUPABASE_SERVICE_KEY,
+    }
+    if content_type:
+        h["Content-Type"] = content_type
+    return h
 
 
 def _upload_to_supabase(content: bytes, ext: str, employee_id: int) -> str:
-    client = _supabase_client()
+    import httpx
     path = f"employees/{employee_id}{ext}"
+    base = f"{settings.SUPABASE_URL}/storage/v1"
 
-    # Delete any existing file for this employee (handles extension changes)
-    existing = client.storage.from_(BUCKET_NAME).list("employees")
-    to_remove = [f"employees/{f['name']}" for f in existing if f["name"].startswith(f"{employee_id}.")]
-    if to_remove:
-        client.storage.from_(BUCKET_NAME).remove(to_remove)
+    httpx.post(
+        f"{base}/object/{BUCKET_NAME}/{path}",
+        headers={**_sb_headers("image/jpeg"), "x-upsert": "true"},
+        content=content,
+        timeout=30,
+    ).raise_for_status()
 
-    client.storage.from_(BUCKET_NAME).upload(
-        path=path,
-        file=content,
-        file_options={"upsert": "true"},
-    )
-
-    return client.storage.from_(BUCKET_NAME).get_public_url(path)
+    return f"{base}/object/public/{BUCKET_NAME}/{path}"
 
 
 def _delete_from_supabase(url: str) -> None:
+    import httpx
     marker = f"/object/public/{BUCKET_NAME}/"
     if marker not in url:
         return
     path = url.split(marker)[-1]
-    _supabase_client().storage.from_(BUCKET_NAME).remove([path])
+    httpx.delete(
+        f"{settings.SUPABASE_URL}/storage/v1/object/{BUCKET_NAME}",
+        headers=_sb_headers("application/json"),
+        json={"prefixes": [path]},
+        timeout=10,
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
