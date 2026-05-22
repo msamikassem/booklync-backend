@@ -219,6 +219,20 @@ def update_employee(
     return employee
 
 
+def set_profile_picture(
+    db: Session,
+    employee_id: int,
+    agent_id: int,
+    business_id: int,
+    url: str | None,
+) -> Employee:
+    employee = get_employee(db, employee_id, agent_id, business_id)
+    employee.profile_picture_url = url
+    db.commit()
+    db.refresh(employee)
+    return employee
+
+
 def delete_employee(
     db: Session,
     employee_id: int,

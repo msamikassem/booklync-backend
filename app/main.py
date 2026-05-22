@@ -2,12 +2,14 @@
 app/main.py
 """
 
+import os
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from app.core.config import settings
@@ -114,6 +116,10 @@ def create_app() -> FastAPI:
         )
 
     register_exception_handlers(app)
+
+    if settings.STORAGE_BACKEND == "local":
+        os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+        app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
 
     app.include_router(auth.router,             prefix="/api/v1/auth",          tags=["Auth"])
     app.include_router(agents.router,           prefix="/api/v1/agents",        tags=["Agents"])

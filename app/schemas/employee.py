@@ -170,6 +170,7 @@ class EmployeeResponse(BaseModel):
     phone: Optional[str] = None
     email: Optional[str] = None
     active: bool
+    profile_picture_url: Optional[str] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

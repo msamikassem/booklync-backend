@@ -147,14 +147,15 @@ class AIAgent(Base):
 class Employee(Base):
     __tablename__ = "employees"
 
-    id         = Column(Integer, primary_key=True, autoincrement=True)
-    agent_id   = Column(Integer, ForeignKey("ai_agents.id"), nullable=False)
-    name       = Column(Text, nullable=False)
-    role       = Column(Text)
-    phone      = Column(Text)
-    email      = Column(Text)
-    active     = Column(Boolean, nullable=False, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    id                  = Column(Integer, primary_key=True, autoincrement=True)
+    agent_id            = Column(Integer, ForeignKey("ai_agents.id"), nullable=False)
+    name                = Column(Text, nullable=False)
+    role                = Column(Text)
+    phone               = Column(Text)
+    email               = Column(Text)
+    active              = Column(Boolean, nullable=False, default=True)
+    profile_picture_url = Column(Text, nullable=True)
+    created_at          = Column(DateTime(timezone=True), server_default=func.now())
     # track when the record was last modified.
     updated_at = Column(
         DateTime(timezone=True),

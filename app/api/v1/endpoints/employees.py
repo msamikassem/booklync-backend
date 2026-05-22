@@ -9,7 +9,7 @@ ownership chain can be verified:
     business → agent → employee
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, UploadFile, File
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -31,6 +31,7 @@ from app.schemas.employee import (
     MessageResponse,
 )
 from app.services import employee_service
+from app.services import storage_service
 
 router = APIRouter()
 
@@ -163,6 +164,63 @@ def deactivate_employee(
 ):
     """Deactivate an employee so they stop receiving bookings."""
     return employee_service.deactivate_employee(db, employee_id, agent_id, current_business.id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROFILE PICTURE
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/{employee_id}/profile-picture",
+    response_model=EmployeeResponse,
+    status_code=200,
+    summary="Upload a profile picture for an employee",
+)
+async def upload_profile_picture(
+    employee_id: int,
+    agent_id: int = Query(..., description="The agent this employee belongs to"),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    """
+    Upload a profile picture for an employee. Max size: 2MB.
+    Replaces the existing picture if one already exists.
+    """
+    content = await file.read()
+
+    # Get the employee first so we can delete the old picture if there is one
+    employee = employee_service.get_employee(db, employee_id, agent_id, current_business.id)
+    old_url = employee.profile_picture_url
+
+    new_url = storage_service.upload_profile_picture(content, file.filename or "", employee_id)
+
+    if old_url:
+        storage_service.delete_profile_picture(old_url)
+
+    return employee_service.set_profile_picture(db, employee_id, agent_id, current_business.id, new_url)
+
+
+@router.delete(
+    "/{employee_id}/profile-picture",
+    response_model=MessageResponse,
+    status_code=200,
+    summary="Remove the profile picture for an employee",
+)
+def delete_profile_picture(
+    employee_id: int,
+    agent_id: int = Query(..., description="The agent this employee belongs to"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    """Removes the profile picture and deletes the file from storage."""
+    employee = employee_service.get_employee(db, employee_id, agent_id, current_business.id)
+
+    if employee.profile_picture_url:
+        storage_service.delete_profile_picture(employee.profile_picture_url)
+        employee_service.set_profile_picture(db, employee_id, agent_id, current_business.id, None)
+
+    return {"message": "Profile picture removed"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

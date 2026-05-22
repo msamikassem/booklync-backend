@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     # Find more at elevenlabs.io/voice-library
     ELEVENLABS_VOICE_ID: str = "rachel"
 
+    # ── Storage ───────────────────────────────────────────────────────────
+    # "local"    → save files to UPLOAD_DIR on disk, served via /uploads
+    # "supabase" → upload to Supabase Storage bucket
+    STORAGE_BACKEND: str = "local"
+    UPLOAD_DIR: str = "uploads"
+    SUPABASE_URL: str = ""          # required when STORAGE_BACKEND=supabase
+    SUPABASE_SERVICE_KEY: str = ""  # service role key (not anon key)
+
     # ── Logging ───────────────────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "logs/app.log"

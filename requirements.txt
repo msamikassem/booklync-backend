@@ -32,6 +32,12 @@ twilio==9.1.0
 # Logging
 loguru==0.7.2
 
+# File uploads
+python-multipart==0.0.9
+
+# Supabase (storage — required when STORAGE_BACKEND=supabase)
+supabase==2.4.0
+
 # Testing
 pytest==8.2.2
 pytest-asyncio==0.23.7
