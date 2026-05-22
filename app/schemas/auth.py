@@ -113,7 +113,6 @@ class BusinessResponse(BaseModel):
     business_type_id: int
     subscription_plan: str
     active: bool
-
     # This tells Pydantic to read data from SQLAlchemy model attributes
     # Without this, Pydantic wouldn't know how to read SQLAlchemy objects
     model_config = {"from_attributes": True}

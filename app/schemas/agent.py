@@ -121,6 +121,7 @@ class AgentResponse(BaseModel):
     model: str
     sms_welcome_message: Optional[str] = None
     sms_post_welcome_behavior: Optional[str] = None
+    booking_page_slug: Optional[str] = None
     active: bool
     created_at: datetime
 

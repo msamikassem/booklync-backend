@@ -10,6 +10,8 @@ Key rules enforced here:
   - Deleting an agent cascades to employees, services, appointments etc
 """
 
+import re
+
 from sqlalchemy.orm import Session
 from loguru import logger
 
@@ -58,6 +60,14 @@ def create_agent(db: Session, data: AgentCreate, business_id: int) -> AIAgent:
             code="PHONE_NUMBER_TAKEN"
         )
 
+    # Generate unique slug from location_name
+    base_slug = re.sub(r'[^a-z0-9]+', '-', data.location_name.lower()).strip('-') or 'branch'
+    slug = base_slug
+    counter = 2
+    while db.query(AIAgent).filter(AIAgent.booking_page_slug == slug).first():
+        slug = f"{base_slug}-{counter}"
+        counter += 1
+
     # Step 2 — create the agent
     agent = AIAgent(
         business_id=business_id,
@@ -67,7 +77,8 @@ def create_agent(db: Session, data: AgentCreate, business_id: int) -> AIAgent:
         timezone=data.timezone,
         model=data.model,
         sms_welcome_message=data.sms_welcome_message,
-        sms_post_welcome_behavior=data.sms_post_welcome_behavior, 
+        sms_post_welcome_behavior=data.sms_post_welcome_behavior,
+        booking_page_slug=slug,
         active=False,    # agents start inactive until configured and ready
     )
 

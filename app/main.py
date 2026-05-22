@@ -4,13 +4,18 @@ app/main.py
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
+
+# Resolve the frontend directory relative to this file's location
+FRONTEND_DIR = Path(__file__).parent.parent.parent / "frontend"
 
 from app.core.config import settings
 from app.core.logging import setup_logging
@@ -30,6 +35,7 @@ from app.api.v1.endpoints import twilio_webhook
 from app.api.v1.endpoints import chat
 from app.api.v1.endpoints import voice
 from app.api.v1.endpoints import notifications   # ← new
+from app.api.v1.endpoints import public
 
 
 # ── Scheduler instance ────────────────────────────────────────────────────────
@@ -133,10 +139,24 @@ def create_app() -> FastAPI:
     app.include_router(chat.router,             prefix="/api/v1/chat",          tags=["Chat"])
     app.include_router(voice.router,            prefix="/api/v1/voice",         tags=["Voice"])
     app.include_router(notifications.router,    prefix="/api/v1/notifications", tags=["Notifications"])
+    app.include_router(public.router,           prefix="/api/v1/public",        tags=["Public"])
 
     @app.get("/health", tags=["Health"])
     def health_check():
         return {"status": "ok", "app": settings.APP_NAME, "env": settings.APP_ENV}
+
+    # ── Clean booking-page URLs ────────────────────────────────────────────────
+    # /b/{slug}  →  /book.html?slug={slug}
+    # In production this is handled by the web server (nginx / Vercel).
+    # Here it lets you use localhost:8000/b/luxe-hair-salon during development.
+    @app.get("/b/{slug}", include_in_schema=False)
+    def booking_page_redirect(slug: str):
+        return RedirectResponse(url=f"/book.html?slug={slug}")
+
+    # Serve the frontend static files at root (dev only — comes last so all
+    # /api/* and named routes above take precedence).
+    if FRONTEND_DIR.exists():
+        app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 
     return app
 
