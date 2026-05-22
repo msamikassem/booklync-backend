@@ -34,7 +34,7 @@ pip install -r requirements.txt
 cp .env.example .env  # then fill in values
 ```
 
-Required `.env` keys: `DATABASE_URL`, `SECRET_KEY`. Optional: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `VAPI_API_KEY`, `VAPI_SERVER_URL`.
+Required `.env` keys: `DATABASE_URL`, `SECRET_KEY`. Set `DB_USE_SSL=True` when connecting to Supabase (or any SSL-required host). Optional: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `VAPI_API_KEY`, `VAPI_SERVER_URL`.
 
 The API docs are at `/docs` (only when `DEBUG=True`). The health check endpoint is `/health`.
 

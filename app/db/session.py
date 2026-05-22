@@ -18,8 +18,13 @@ from loguru import logger
 from app.core.config import settings
 
 # ── Engine ────────────────────────────────────────────────────────────────────
+# Supabase (and most hosted PostgreSQL providers) require SSL.
+# Set DB_USE_SSL=True in .env when pointing at Supabase.
+_connect_args = {"sslmode": "require"} if settings.DB_USE_SSL else {}
+
 engine = create_engine(
     settings.DATABASE_URL,
+    connect_args=_connect_args,
     pool_pre_ping=True,     # test connections before using them (handles dropped connections)
     pool_size=10,           # number of persistent connections in the pool
     max_overflow=20,        # extra connections allowed under high load

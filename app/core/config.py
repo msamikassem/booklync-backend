@@ -20,6 +20,9 @@ class Settings(BaseSettings):
 
     # ── Database ──────────────────────────────────────────────────────────
     DATABASE_URL: str
+    # Set to True when connecting to Supabase (or any host that requires SSL).
+    # Local PostgreSQL typically does not need this.
+    DB_USE_SSL: bool = False
 
     # ── Security ──────────────────────────────────────────────────────────
     SECRET_KEY: str
