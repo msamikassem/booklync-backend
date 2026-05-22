@@ -1,5 +1,5 @@
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config
+from sqlalchemy import create_engine
 from sqlalchemy import pool
 from alembic import context
 
@@ -10,10 +10,6 @@ from app.models.models import Base
 # this is the Alembic Config object
 config = context.config
 
-# override the sqlalchemy.url from alembic.ini
-# with the real URL from your .env file
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
-
 # setup loggers
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -21,11 +17,15 @@ if config.config_file_name is not None:
 # this is what tells Alembic which tables to track
 target_metadata = Base.metadata
 
+# Build the engine directly from settings so that special characters in the
+# password (e.g. % signs from URL-encoding) are never passed through
+# configparser, which would misinterpret them as interpolation syntax.
+_connect_args = {"sslmode": "require"} if settings.DB_USE_SSL else {}
+
 
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=settings.DATABASE_URL,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -35,9 +35,9 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    connectable = create_engine(
+        settings.DATABASE_URL,
+        connect_args=_connect_args,
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
