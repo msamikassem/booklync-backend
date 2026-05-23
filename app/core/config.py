@@ -56,6 +56,17 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = ""          # required when STORAGE_BACKEND=supabase
     SUPABASE_SERVICE_KEY: str = ""  # service role key (not anon key)
 
+    # ── Custom domains ────────────────────────────────────────────────────
+    # Vercel API credentials — used to programmatically add/remove custom
+    # domains so Vercel provisions SSL automatically.
+    # Leave blank if not hosting on Vercel.
+    VERCEL_TOKEN: str = ""
+    VERCEL_PROJECT_ID: str = ""
+    VERCEL_TEAM_ID: str = ""   # required only for team-owned Vercel projects
+    # The CNAME value users must point their domain at.
+    # On Vercel hosting this is always cname.vercel-dns.com.
+    CNAME_TARGET: str = "cname.vercel-dns.com"
+
     # ── Logging ───────────────────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "logs/app.log"

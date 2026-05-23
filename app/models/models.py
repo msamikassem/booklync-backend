@@ -125,6 +125,8 @@ class AIAgent(Base):
     minutes_used = Column(Float, default=0.0, nullable=False, server_default="0")
     # booking_page_slug is the public URL slug for this branch (e.g. "luxe-salon-main").
     booking_page_slug = Column(Text, nullable=True, unique=True, index=True)
+    custom_domain     = Column(Text, nullable=True, unique=True, index=True)
+    domain_verified   = Column(Boolean, default=False, nullable=False, server_default="false")
     active        = Column(Boolean, default=False, nullable=False)
     created_at    = Column(DateTime(timezone=True), server_default=func.now())
 

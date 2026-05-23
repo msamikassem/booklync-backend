@@ -8,8 +8,8 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from app.core.cors import SmartCORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
@@ -104,22 +104,14 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    app.add_middleware(SmartCORSMiddleware, private_origins=settings.CORS_ORIGINS)
 
     if not settings.DEBUG:
-        app.add_middleware(
-            TrustedHostMiddleware,
-            allowed_hosts=[
-                settings.API_BASE_URL.replace("https://", "").replace("http://", ""),
-                "localhost",
-            ],
-        )
+        allowed_hosts = [
+            settings.API_BASE_URL.replace("https://", "").replace("http://", ""),
+            "localhost",
+        ]
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
     register_exception_handlers(app)
 

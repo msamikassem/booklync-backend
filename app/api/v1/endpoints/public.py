@@ -93,6 +93,39 @@ def get_public_business(slug: str, db: Session = Depends(get_db)):
 
 
 @router.get(
+    "/business-by-domain/{hostname}",
+    response_model=PublicAgentResponse,
+    summary="Get public branch info by verified custom domain (no auth)",
+)
+def get_public_business_by_domain(hostname: str, db: Session = Depends(get_db)):
+    """
+    Used by book.html when loaded on a custom domain.
+    Only returns data for domains that have been verified.
+    """
+    agent = (
+        db.query(AIAgent)
+        .filter(
+            AIAgent.custom_domain == hostname.lower().strip(),
+            AIAgent.domain_verified == True,
+        )
+        .first()
+    )
+    if not agent:
+        raise NotFoundException(
+            detail=f"No verified booking page found for domain {hostname}",
+            code="DOMAIN_NOT_FOUND",
+        )
+    return PublicAgentResponse(
+        agent_name=agent.agent_name,
+        location_name=agent.location_name,
+        phone_number=agent.phone_number,
+        booking_page_slug=agent.booking_page_slug,
+        business_name=agent.business.name,
+        timezone=agent.timezone,
+    )
+
+
+@router.get(
     "/business/{slug}/services",
     response_model=list[PublicServiceResponse],
     summary="List active services for a branch (no auth)",
