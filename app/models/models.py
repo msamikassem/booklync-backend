@@ -320,6 +320,12 @@ class Service(Base):
     # Null when the service has variations (price/duration live on each variation instead)
     duration_minutes = Column(Integer, nullable=True)
     price            = Column(Numeric(10, 2), nullable=True)
+    # Preparation buffers: employee time reserved before/after the appointment window.
+    # Used by the availability engine to prevent back-to-back bookings with no setup time.
+    preparation_before_minutes = Column(Integer, nullable=True)
+    preparation_after_minutes  = Column(Integer, nullable=True)
+    # Optional display colour for calendar/UI (6-digit hex, e.g. #FF5733). Null = use default.
+    color            = Column(Text, nullable=True)
     active           = Column(Boolean, nullable=False, default=True)
     sort_order       = Column(Integer, nullable=False, default=0)
     updated_at       = Column(
@@ -337,8 +343,10 @@ class Service(Base):
     appointments      = relationship("Appointment",        back_populates="service", cascade="all, delete")
 
     __table_args__ = (
-        CheckConstraint("duration_minutes IS NULL OR duration_minutes > 0", name="ck_service_duration_positive"),
-        CheckConstraint("price IS NULL OR price >= 0",                      name="ck_service_price_non_negative"),
+        CheckConstraint("duration_minutes IS NULL OR duration_minutes > 0",          name="ck_service_duration_positive"),
+        CheckConstraint("price IS NULL OR price >= 0",                               name="ck_service_price_non_negative"),
+        CheckConstraint("preparation_before_minutes IS NULL OR preparation_before_minutes >= 0", name="ck_service_prep_before_non_negative"),
+        CheckConstraint("preparation_after_minutes  IS NULL OR preparation_after_minutes  >= 0", name="ck_service_prep_after_non_negative"),
     )
 
 

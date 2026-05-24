@@ -227,6 +227,9 @@ def create_service(
         description=data.description,
         duration_minutes=data.duration_minutes,
         price=data.price,
+        preparation_before_minutes=data.preparation_before_minutes,
+        preparation_after_minutes=data.preparation_after_minutes,
+        color=data.color,
         sort_order=data.sort_order,
         active=True,
     )
@@ -311,6 +314,12 @@ def update_service(
     update_data = data.model_dump(exclude_none=True)
     for field, value in update_data.items():
         setattr(service, field, value)
+
+    # These three fields are nullable — allow explicitly sending null to clear them.
+    # exclude_none=True above would skip them, so we handle them separately.
+    for field in ("preparation_before_minutes", "preparation_after_minutes", "color"):
+        if field in data.model_fields_set:
+            setattr(service, field, getattr(data, field))
 
     db.commit()
     db.refresh(service)

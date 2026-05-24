@@ -32,7 +32,7 @@ from typing import Optional
 import pytz
 
 from sqlalchemy import or_, func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from loguru import logger
 
 from app.models.models import (
@@ -544,12 +544,17 @@ def _get_employee_slots(
     day_start = tz.localize(datetime.combine(requested_date, time(0, 0, 0)))
     day_end = tz.localize(datetime.combine(requested_date, time(23, 59, 59)))
 
-    existing_appointments = db.query(Appointment).filter(
-        Appointment.employee_id == employee.id,
-        Appointment.start_time >= day_start,
-        Appointment.start_time <= day_end,
-        Appointment.status.notin_(["cancelled", "no_show"]),
-    ).all()
+    existing_appointments = (
+        db.query(Appointment)
+        .options(joinedload(Appointment.service))
+        .filter(
+            Appointment.employee_id == employee.id,
+            Appointment.start_time >= day_start,
+            Appointment.start_time <= day_end,
+            Appointment.status.notin_(["cancelled", "no_show"]),
+        )
+        .all()
+    )
 
     # get blocked times for this day of week
     blocked_times = db.query(BlockedTime).filter(
@@ -560,6 +565,11 @@ def _get_employee_slots(
     # earliest bookable time — current time + MIN_ADVANCE_MINUTES
     earliest_bookable = datetime.now(tz) + timedelta(minutes=MIN_ADVANCE_MINUTES)
 
+    # preparation buffers from the service (null → 0)
+    prep_before_minutes = service.preparation_before_minutes or 0
+    prep_after_minutes  = service.preparation_after_minutes  or 0
+    prep_after_td       = timedelta(minutes=prep_after_minutes)
+
     # generate candidate slots
     service_duration = timedelta(minutes=duration_minutes)
     slot_interval = timedelta(minutes=SLOT_INTERVAL_MINUTES)
@@ -567,7 +577,8 @@ def _get_employee_slots(
     valid_slots = []
     current = effective_start
 
-    while current + service_duration <= effective_end:
+    # The last slot must finish (including post-appointment prep) within the working window.
+    while current + service_duration + prep_after_td <= effective_end:
         slot_end = current + service_duration
 
         # skip slots in the past or within minimum advance time
@@ -575,8 +586,12 @@ def _get_employee_slots(
             current += slot_interval
             continue
 
-        # check against existing appointments
-        if _overlaps_appointments(current, slot_end, existing_appointments, tz):
+        # check against existing appointments (accounting for this service's prep buffers)
+        if _overlaps_appointments(
+            current, slot_end, existing_appointments, tz,
+            prep_before_minutes=prep_before_minutes,
+            prep_after_minutes=prep_after_minutes,
+        ):
             current += slot_interval
             continue
 
@@ -602,15 +617,36 @@ def _overlaps_appointments(
     slot_end: datetime,
     appointments: list,
     tz,
+    prep_before_minutes: int = 0,
+    prep_after_minutes: int = 0,
 ) -> bool:
     """
-    Returns True if the slot overlaps any existing appointment.
-    Uses the standard overlap formula: start1 < end2 AND end1 > start2
+    Returns True if the candidate slot conflicts with any existing appointment,
+    accounting for preparation buffers on BOTH sides.
+
+    The new slot's effective window: [slot_start - prep_before, slot_end + prep_after]
+    Each existing appointment's effective window: [appt.start - appt_prep_before, appt.end + appt_prep_after]
+
+    A conflict exists when these two windows overlap. Checking only the new slot's
+    buffers misses the case where an existing appointment's prep time extends into
+    the new slot (e.g. existing ends at 10:30 with prep_after=15, new slot starts
+    at 10:31 — one-sided check would not catch this).
+
+    Appointments should be loaded with joinedload(Appointment.service) so that
+    appt.service is available without extra queries.
     """
+    new_eff_start = slot_start - timedelta(minutes=prep_before_minutes)
+    new_eff_end   = slot_end   + timedelta(minutes=prep_after_minutes)
+
     for appt in appointments:
-        appt_start = _ensure_tz_aware(appt.start_time, tz)
-        appt_end = _ensure_tz_aware(appt.end_time, tz)
-        if slot_start < appt_end and slot_end > appt_start:
+        appt_svc = appt.service if hasattr(appt, 'service') else None
+        appt_prep_before = timedelta(minutes=(appt_svc.preparation_before_minutes or 0) if appt_svc else 0)
+        appt_prep_after  = timedelta(minutes=(appt_svc.preparation_after_minutes  or 0) if appt_svc else 0)
+
+        appt_eff_start = _ensure_tz_aware(appt.start_time, tz) - appt_prep_before
+        appt_eff_end   = _ensure_tz_aware(appt.end_time,   tz) + appt_prep_after
+
+        if new_eff_start < appt_eff_end and new_eff_end > appt_eff_start:
             return True
     return False
 

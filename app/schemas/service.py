@@ -13,9 +13,12 @@ A service with variations has price/duration_minutes as null; each variation
 carries its own price and duration_minutes.
 """
 
+import re
 from pydantic import BaseModel, field_validator, model_validator
 from typing import Optional
 from decimal import Decimal
+
+_HEX_COLOR_RE = re.compile(r'^#[0-9A-Fa-f]{6}$')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -142,6 +145,9 @@ class ServiceCreate(BaseModel):
     # Omit both when the service will use variations instead.
     duration_minutes: Optional[int] = None
     price: Optional[Decimal] = None
+    preparation_before_minutes: Optional[int] = None
+    preparation_after_minutes: Optional[int] = None
+    color: Optional[str] = None
     sort_order: int = 0
     # Variations can be created inline with the service
     variations: list[ServiceVariationCreate] = []
@@ -167,6 +173,22 @@ class ServiceCreate(BaseModel):
             raise ValueError("Price cannot be negative")
         return v
 
+    @field_validator("preparation_before_minutes", "preparation_after_minutes")
+    @classmethod
+    def prep_non_negative(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 0:
+            raise ValueError("Preparation time cannot be negative")
+        return v
+
+    @field_validator("color")
+    @classmethod
+    def color_hex(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not _HEX_COLOR_RE.match(v):
+            raise ValueError("Color must be a 6-digit hex code (e.g. #FF5733)")
+        return v.upper()
+
     @model_validator(mode="after")
     def price_or_variations_required(self):
         has_flat = self.price is not None and self.duration_minutes is not None
@@ -190,6 +212,9 @@ class ServiceUpdate(BaseModel):
     description: Optional[str] = None
     duration_minutes: Optional[int] = None
     price: Optional[Decimal] = None
+    preparation_before_minutes: Optional[int] = None
+    preparation_after_minutes: Optional[int] = None
+    color: Optional[str] = None
     sort_order: Optional[int] = None
 
     @field_validator("name")
@@ -212,6 +237,22 @@ class ServiceUpdate(BaseModel):
         if v is not None and v < 0:
             raise ValueError("Price cannot be negative")
         return v
+
+    @field_validator("preparation_before_minutes", "preparation_after_minutes")
+    @classmethod
+    def prep_non_negative(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 0:
+            raise ValueError("Preparation time cannot be negative")
+        return v
+
+    @field_validator("color")
+    @classmethod
+    def color_hex(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not _HEX_COLOR_RE.match(v):
+            raise ValueError("Color must be a 6-digit hex code (e.g. #FF5733)")
+        return v.upper()
 
 
 class AssignEmployeeRequest(BaseModel):
@@ -238,6 +279,9 @@ class ServiceResponse(BaseModel):
     description: Optional[str] = None
     duration_minutes: Optional[int] = None
     price: Optional[Decimal] = None
+    preparation_before_minutes: Optional[int] = None
+    preparation_after_minutes: Optional[int] = None
+    color: Optional[str] = None
     active: bool
     sort_order: int
     variations: list[ServiceVariationResponse] = []

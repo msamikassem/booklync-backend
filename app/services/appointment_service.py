@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import pytz
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from loguru import logger
 
 from app.models.models import (
@@ -29,6 +29,8 @@ from app.models.models import (
     ServiceVariation,
     DayOff,
     BlockedTime,
+    BusinessHour,
+    EmployeeWorkingHour,
 )
 from app.schemas.appointment import (
     AppointmentCreate,
@@ -77,35 +79,63 @@ def _check_no_overlap(
     employee_id: int,
     start_time: datetime,
     end_time: datetime,
+    service: Optional[Service] = None,
     exclude_appointment_id: Optional[int] = None,
 ) -> None:
     """
-    Check that an employee has no overlapping appointment.
-    Raises SlotUnavailableException if there is an overlap.
+    Check that an employee has no overlapping appointment, accounting for
+    preparation buffers on BOTH the new appointment and each existing one.
 
-    Two time ranges overlap if: start1 < end2 AND end1 > start2
-    This covers all overlap cases — partial, full containment, exact match.
+    The effective blocked window for any appointment is:
+        [start - prep_before, end + prep_after]
+
+    A conflict exists when two effective windows overlap:
+        new_eff_start < existing_eff_end  AND  new_eff_end > existing_eff_start
+
+    We must expand both sides — checking only the new appointment's buffers
+    misses the case where an existing appointment's prep time extends into
+    the new slot (e.g. existing ends at 10:30 with prep_after=15, new starts
+    at 10:31 — would slip through a one-sided check).
     """
-    query = db.query(Appointment).filter(
-        Appointment.employee_id == employee_id,
-        Appointment.status.notin_(["cancelled", "no_show"]),
-        Appointment.start_time < end_time,
-        Appointment.end_time > start_time,
-    )
+    prep_before_new = timedelta(minutes=(service.preparation_before_minutes or 0) if service else 0)
+    prep_after_new  = timedelta(minutes=(service.preparation_after_minutes  or 0) if service else 0)
 
+    new_eff_start = start_time - prep_before_new
+    new_eff_end   = end_time   + prep_after_new
+
+    # SQL pre-filter: load appointments whose core [start, end] is within 4 hours
+    # of our effective window — a generous bound that catches any appointment whose
+    # own prep buffers could reach into our slot without over-fetching history.
+    _BUFFER = timedelta(hours=4)
+    query = (
+        db.query(Appointment)
+        .options(joinedload(Appointment.service))
+        .filter(
+            Appointment.employee_id == employee_id,
+            Appointment.status.notin_(["cancelled", "no_show"]),
+            Appointment.start_time < new_eff_end   + _BUFFER,
+            Appointment.end_time   > new_eff_start - _BUFFER,
+        )
+    )
     if exclude_appointment_id:
         query = query.filter(Appointment.id != exclude_appointment_id)
 
-    conflict = query.first()
+    for appt in query.all():
+        appt_svc = appt.service
+        appt_prep_before = timedelta(minutes=(appt_svc.preparation_before_minutes or 0) if appt_svc else 0)
+        appt_prep_after  = timedelta(minutes=(appt_svc.preparation_after_minutes  or 0) if appt_svc else 0)
 
-    if conflict:
-        raise SlotUnavailableException(
-            detail=(
-                f"This employee already has an appointment from "
-                f"{conflict.start_time.strftime('%H:%M')} to "
-                f"{conflict.end_time.strftime('%H:%M')} UTC"
+        appt_eff_start = _ensure_tz_aware(appt.start_time, pytz.UTC) - appt_prep_before
+        appt_eff_end   = _ensure_tz_aware(appt.end_time,   pytz.UTC) + appt_prep_after
+
+        if new_eff_start < appt_eff_end and new_eff_end > appt_eff_start:
+            raise SlotUnavailableException(
+                detail=(
+                    f"This employee already has an appointment from "
+                    f"{appt.start_time.strftime('%H:%M')} to "
+                    f"{appt.end_time.strftime('%H:%M')} UTC"
+                )
             )
-        )
 
 
 def _check_no_blocked_time(
@@ -145,6 +175,92 @@ def _check_no_blocked_time(
                 ),
                 code="BREAK_CONFLICT",
             )
+
+
+def _check_business_hours(
+    db: Session,
+    agent: AIAgent,
+    start_time: datetime,
+    end_time: datetime,
+) -> None:
+    """
+    Raise SlotUnavailableException if the appointment window falls outside
+    the branch's configured business hours for that weekday.
+
+    Working-hours times are stored without timezone in the agent's local tz,
+    so we convert the UTC appointment times to local before comparing.
+    """
+    tz = _get_tz(agent)
+    start_local = _ensure_tz_aware(start_time, tz).astimezone(tz)
+    appt_date = start_local.date()
+    day_of_week = appt_date.weekday()
+
+    business_hour = db.query(BusinessHour).filter(
+        BusinessHour.agent_id == agent.id,
+        BusinessHour.day_of_week == day_of_week,
+    ).first()
+
+    if not business_hour:
+        raise SlotUnavailableException(
+            detail="Branch is not open on this day of the week",
+            code="OUTSIDE_BUSINESS_HOURS",
+        )
+
+    branch_open  = tz.localize(datetime.combine(appt_date, business_hour.open_time))
+    branch_close = tz.localize(datetime.combine(appt_date, business_hour.closed_time))
+    end_local    = _ensure_tz_aware(end_time, tz).astimezone(tz)
+
+    if start_local < branch_open or end_local > branch_close:
+        raise SlotUnavailableException(
+            detail=(
+                f"Appointment falls outside business hours "
+                f"({business_hour.open_time.strftime('%H:%M')}–"
+                f"{business_hour.closed_time.strftime('%H:%M')})"
+            ),
+            code="OUTSIDE_BUSINESS_HOURS",
+        )
+
+
+def _check_employee_working_hours(
+    db: Session,
+    employee_id: int,
+    agent: AIAgent,
+    start_time: datetime,
+    end_time: datetime,
+) -> None:
+    """
+    Raise SlotUnavailableException if the appointment window falls outside
+    the employee's working hours for that weekday.
+    """
+    tz = _get_tz(agent)
+    start_local = _ensure_tz_aware(start_time, tz).astimezone(tz)
+    appt_date = start_local.date()
+    day_of_week = appt_date.weekday()
+
+    working_hour = db.query(EmployeeWorkingHour).filter(
+        EmployeeWorkingHour.employee_id == employee_id,
+        EmployeeWorkingHour.day_of_week == day_of_week,
+    ).first()
+
+    if not working_hour:
+        raise SlotUnavailableException(
+            detail="Employee does not work on this day of the week",
+            code="OUTSIDE_WORKING_HOURS",
+        )
+
+    emp_start = tz.localize(datetime.combine(appt_date, working_hour.start_time))
+    emp_end   = tz.localize(datetime.combine(appt_date, working_hour.end_time))
+    end_local = _ensure_tz_aware(end_time, tz).astimezone(tz)
+
+    if start_local < emp_start or end_local > emp_end:
+        raise SlotUnavailableException(
+            detail=(
+                f"Appointment falls outside employee working hours "
+                f"({working_hour.start_time.strftime('%H:%M')}–"
+                f"{working_hour.end_time.strftime('%H:%M')})"
+            ),
+            code="OUTSIDE_WORKING_HOURS",
+        )
 
 
 def _build_detail(appointment, agent, customer, employee, service) -> dict:
@@ -315,11 +431,17 @@ def create_appointment(
             code="EMPLOYEE_DAY_OFF"
         )
 
-    # Step 7c — check no blocked time (break) conflict
+    # Step 7c — check appointment is within business hours
+    _check_business_hours(db, agent, data.start_time, end_time)
+
+    # Step 7d — check appointment is within employee working hours
+    _check_employee_working_hours(db, data.employee_id, agent, data.start_time, end_time)
+
+    # Step 7e — check no blocked time (break) conflict
     _check_no_blocked_time(db, data.employee_id, data.start_time, end_time, agent)
 
-    # Step 8 — check no overlap
-    _check_no_overlap(db, data.employee_id, data.start_time, end_time)
+    # Step 8 — check no overlap (pass service so prep buffers are respected)
+    _check_no_overlap(db, data.employee_id, data.start_time, end_time, service=service)
 
     # Step 8 — determine default status
     #if data.source.value in ("dashboard", "manual"):
@@ -477,11 +599,11 @@ def update_appointment(
     new_employee_id = data.employee_id or appointment.employee_id
     new_start_time = data.start_time or appointment.start_time
 
+    # always load service — needed for prep-time checks and duration recalculation
+    service = db.query(Service).filter(Service.id == appointment.service_id).first()
+
     # recalculate end_time if start_time changed
     if data.start_time:
-        service = db.query(Service).filter(
-            Service.id == appointment.service_id
-        ).first()
         duration = service.duration_minutes if service else 60
         new_end_time = new_start_time + timedelta(minutes=duration)
     else:
@@ -489,10 +611,13 @@ def update_appointment(
 
     # check for conflicts if employee or time changed
     if data.employee_id or data.start_time:
+        _check_business_hours(db, agent, new_start_time, new_end_time)
+        _check_employee_working_hours(db, new_employee_id, agent, new_start_time, new_end_time)
         _check_no_blocked_time(db, new_employee_id, new_start_time, new_end_time, agent)
         _check_no_overlap(
             db, new_employee_id, new_start_time, new_end_time,
-            exclude_appointment_id=appointment_id
+            service=service,
+            exclude_appointment_id=appointment_id,
         )
 
     # apply updates
