@@ -621,3 +621,102 @@ def delete_day_off(
     logger.info(f"Day off deleted: id={day_off_id} for employee_id={employee_id}")
 
     return {"message": "Day off removed successfully"}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Employee Capabilities
+# ─────────────────────────────────────────────────────────────────────────────
+
+from sqlalchemy import or_
+from app.models.models import EmployeeCapability, Service, ServiceTitle, ServiceVariation
+from app.core.exceptions import ConflictException
+
+
+def get_capabilities(db: Session, employee_id: int, agent_id: int, business_id: int) -> list:
+    get_employee(db, employee_id, agent_id, business_id)
+    return db.query(EmployeeCapability).filter(
+        EmployeeCapability.employee_id == employee_id
+    ).all()
+
+
+def add_capability(
+    db: Session,
+    employee_id: int,
+    agent_id: int,
+    business_id: int,
+    title_id: int | None = None,
+    service_id: int | None = None,
+    variation_id: int | None = None,
+    extra_price=None,
+) -> EmployeeCapability:
+    get_employee(db, employee_id, agent_id, business_id)
+
+    # Validate exactly one target is provided
+    provided = [x for x in (title_id, service_id, variation_id) if x is not None]
+    if len(provided) != 1:
+        raise ConflictException(
+            detail="Provide exactly one of: title_id, service_id, variation_id",
+            code="INVALID_CAPABILITY"
+        )
+
+    # Verify the target belongs to this agent
+    if title_id:
+        obj = db.query(ServiceTitle).filter(ServiceTitle.id == title_id, ServiceTitle.agent_id == agent_id).first()
+        if not obj:
+            raise NotFoundException(detail="Service title not found for this agent")
+    elif service_id:
+        obj = db.query(Service).filter(Service.id == service_id, Service.agent_id == agent_id).first()
+        if not obj:
+            raise NotFoundException(detail="Service not found for this agent")
+    else:
+        obj = db.query(ServiceVariation).join(Service).filter(
+            ServiceVariation.id == variation_id, Service.agent_id == agent_id
+        ).first()
+        if not obj:
+            raise NotFoundException(detail="Service variation not found for this agent")
+
+    # Check for duplicate
+    dup_filter = []
+    if title_id:     dup_filter.append(EmployeeCapability.title_id == title_id)
+    if service_id:   dup_filter.append(EmployeeCapability.service_id == service_id)
+    if variation_id: dup_filter.append(EmployeeCapability.variation_id == variation_id)
+
+    existing = db.query(EmployeeCapability).filter(
+        EmployeeCapability.employee_id == employee_id,
+        or_(*dup_filter),
+    ).first()
+    if existing:
+        raise ConflictException(detail="Capability already assigned", code="ALREADY_ASSIGNED")
+
+    from decimal import Decimal
+    cap = EmployeeCapability(
+        employee_id=employee_id,
+        title_id=title_id,
+        service_id=service_id,
+        variation_id=variation_id,
+        extra_price=extra_price if extra_price is not None else Decimal("0"),
+    )
+    db.add(cap)
+    db.commit()
+    db.refresh(cap)
+    return cap
+
+
+def remove_capability(
+    db: Session,
+    employee_id: int,
+    agent_id: int,
+    capability_id: int,
+    business_id: int,
+) -> dict:
+    get_employee(db, employee_id, agent_id, business_id)
+
+    cap = db.query(EmployeeCapability).filter(
+        EmployeeCapability.id == capability_id,
+        EmployeeCapability.employee_id == employee_id,
+    ).first()
+    if not cap:
+        raise NotFoundException(detail="Capability not found")
+
+    db.delete(cap)
+    db.commit()
+    return {"message": "Capability removed successfully"}

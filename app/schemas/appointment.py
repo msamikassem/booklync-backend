@@ -55,6 +55,7 @@ class AppointmentCreate(BaseModel):
     customer_id: int
     employee_id: int
     service_id: int
+    variation_id: Optional[int] = None
     start_time: datetime
     source: AppointmentSourceEnum
     note: Optional[str] = None
@@ -101,6 +102,8 @@ class AppointmentDetailResponse(BaseModel):
     employee_name: str
     service_id: Optional[int] = None
     service_name: Optional[str] = None
+    variation_id: Optional[int] = None
+    variation_name: Optional[str] = None
 
     # UTC — use for all calculations and comparisons
     start_time: datetime

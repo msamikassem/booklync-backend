@@ -31,6 +31,7 @@ from datetime import datetime, date, time, timedelta
 from typing import Optional
 import pytz
 
+from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 from loguru import logger
 
@@ -43,7 +44,8 @@ from app.models.models import (
     BlockedTime,
     DayOff,
     Appointment,
-    EmployeeService,
+    EmployeeCapability,
+    ServiceVariation,
 )
 from app.schemas.availability import (
     AvailabilityResponse,
@@ -65,6 +67,32 @@ MAX_ADVANCE_DAYS = 60           # maximum days ahead a booking can be made
 CLOSEST_SLOTS_COUNT = 3         # how many closest slots to return on each side
 
 
+def _resolve_duration(db: Session, service: Service, variation_id: Optional[int]) -> int:
+    """
+    Resolve effective slot duration for a service.
+    Priority: specific variation → service flat rate → min active variation → 60-min fallback.
+    """
+    if variation_id is not None:
+        variation = db.query(ServiceVariation).filter(
+            ServiceVariation.id == variation_id,
+            ServiceVariation.service_id == service.id,
+            ServiceVariation.active == True,
+        ).first()
+        if variation:
+            return variation.duration_minutes
+
+    if service.duration_minutes is not None:
+        return service.duration_minutes
+
+    # variation-based service with no specific variation given — use shortest option
+    min_dur = db.query(func.min(ServiceVariation.duration_minutes)).filter(
+        ServiceVariation.service_id == service.id,
+        ServiceVariation.active == True,
+    ).scalar()
+
+    return min_dur or 60
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ENDPOINT 1 — all slots on a date (authenticated)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -76,29 +104,23 @@ def get_availability(
     requested_date: date,
     employee_id: Optional[int],
     business_id: int,
+    variation_id: Optional[int] = None,
 ) -> AvailabilityResponse:
     """
     Returns all available booking slots for a given date and service.
     Requires business ownership of the agent.
 
-    Args:
-        db:             database session
-        agent_id:       which branch to check
-        service_id:     which service (determines duration)
-        requested_date: which calendar date to check
-        employee_id:    optional — filter to one specific employee
-        business_id:    id of the logged in business
-
-    Returns:
-        AvailabilityResponse with list of available slots
+    Pass variation_id to use that variation's duration for slot generation.
+    For variation-based services with no variation_id, uses the shortest active variation.
     """
 
     agent, service, tz = _verify_and_load(
         db, agent_id, service_id, business_id=business_id
     )
+    duration_minutes = _resolve_duration(db, service, variation_id)
 
     return _build_availability_response(
-        db, agent, service, requested_date, employee_id, tz
+        db, agent, service, requested_date, employee_id, tz, duration_minutes
     )
 
 
@@ -113,6 +135,7 @@ def check_slot(
     requested_start: datetime,
     employee_id: Optional[int],
     business_id: int,
+    variation_id: Optional[int] = None,
 ) -> SlotCheckResponse:
     """
     Check if a specific date and time is available.
@@ -120,29 +143,20 @@ def check_slot(
     If available — returns the slot.
     If not available — returns the N closest slots on each side.
 
-    Args:
-        db:              database session
-        agent_id:        which branch to check
-        service_id:      which service
-        requested_start: the exact datetime the customer wants
-                         must be timezone-aware
-        employee_id:     optional — filter to one specific employee
-        business_id:     id of the logged in business
-
-    Returns:
-        SlotCheckResponse
+    Pass variation_id to use that variation's duration for slot generation.
     """
 
     agent, service, tz = _verify_and_load(
         db, agent_id, service_id, business_id=business_id
     )
+    duration_minutes = _resolve_duration(db, service, variation_id)
 
     requested_date = requested_start.astimezone(tz).date()
-    requested_end = requested_start + timedelta(minutes=service.duration_minutes)
+    requested_end = requested_start + timedelta(minutes=duration_minutes)
 
     # get all available slots for that date
     all_slots = _get_all_slots(
-        db, agent, service, requested_date, employee_id, tz
+        db, agent, service, requested_date, employee_id, tz, duration_minutes
     )
 
     # find ALL employees who have this exact slot available
@@ -161,7 +175,7 @@ def check_slot(
         agent_id=agent_id,
         service_id=service_id,
         service_name=service.name,
-        duration_minutes=service.duration_minutes,
+        duration_minutes=duration_minutes,
         requested_start=requested_start,
         requested_end=requested_end,
         available=is_available,
@@ -192,30 +206,22 @@ def get_public_availability(
     service_id: int,
     requested_date: date,
     employee_id: Optional[int],
+    variation_id: Optional[int] = None,
 ) -> AvailabilityResponse:
     """
     Public availability check — no business ownership required.
-
     Used by the customer-facing booking page.
-    Only works for active agents and active services.
 
-    Args:
-        db:             database session
-        agent_id:       which branch to check
-        service_id:     which service
-        requested_date: which date to check
-        employee_id:    optional employee filter
-
-    Returns:
-        AvailabilityResponse with list of available slots
+    Pass variation_id to use that variation's duration for slot generation.
     """
 
     agent, service, tz = _verify_and_load(
         db, agent_id, service_id, public=True
     )
+    duration_minutes = _resolve_duration(db, service, variation_id)
 
     return _build_availability_response(
-        db, agent, service, requested_date, employee_id, tz
+        db, agent, service, requested_date, employee_id, tz, duration_minutes
     )
 
 
@@ -367,32 +373,32 @@ def _build_availability_response(
     requested_date: date,
     employee_id: Optional[int],
     tz,
+    duration_minutes: int,
 ) -> AvailabilityResponse:
     """
     Build the full availability response for a date.
     Shared by both authenticated and public endpoints.
     """
 
-    # validate date range
     local_now = datetime.now(tz)
     local_today = local_now.date()
 
     if requested_date < local_today:
-        # past date — return empty
-        return _empty_response(agent.id, service.id, requested_date, service)
+        return _empty_response(agent.id, service.id, requested_date, service, duration_minutes)
 
     if requested_date > local_today + timedelta(days=MAX_ADVANCE_DAYS):
-        # too far in the future — return empty
-        return _empty_response(agent.id, service.id, requested_date, service)
+        return _empty_response(agent.id, service.id, requested_date, service, duration_minutes)
 
-    all_slots = _get_all_slots(db, agent, service, requested_date, employee_id, tz)
+    all_slots = _get_all_slots(
+        db, agent, service, requested_date, employee_id, tz, duration_minutes
+    )
 
     return AvailabilityResponse(
         agent_id=agent.id,
         service_id=service.id,
         date=requested_date,
         service_name=service.name,
-        duration_minutes=service.duration_minutes,
+        duration_minutes=duration_minutes,
         available_slots=all_slots,
         total_slots=len(all_slots),
     )
@@ -405,6 +411,7 @@ def _get_all_slots(
     requested_date: date,
     employee_id: Optional[int],
     tz,
+    duration_minutes: int,
 ) -> list[EmployeeSlot]:
     """
     Core slot generation. Runs all eight checks and returns valid slots.
@@ -436,14 +443,26 @@ def _get_all_slots(
     branch_open = tz.localize(datetime.combine(requested_date, business_hour.open_time))
     branch_close = tz.localize(datetime.combine(requested_date, business_hour.closed_time))
 
-    # get eligible employees
-    employees_query = db.query(Employee).join(
-        EmployeeService,
-        Employee.id == EmployeeService.employee_id,
-    ).filter(
+    # Employees eligible for this service: granted at variation, service, or title level
+    variation_ids = db.query(ServiceVariation.id).filter(
+        ServiceVariation.service_id == service.id
+    ).scalar_subquery()
+
+    cap_conditions = [
+        EmployeeCapability.service_id == service.id,
+        EmployeeCapability.variation_id.in_(variation_ids),
+    ]
+    if service.title_id:
+        cap_conditions.append(EmployeeCapability.title_id == service.title_id)
+
+    capable_emp_ids = db.query(EmployeeCapability.employee_id).filter(
+        or_(*cap_conditions)
+    ).subquery()
+
+    employees_query = db.query(Employee).filter(
         Employee.agent_id == agent.id,
         Employee.active == True,
-        EmployeeService.service_id == service.id,
+        Employee.id.in_(capable_emp_ids),
     )
 
     if employee_id is not None:
@@ -466,6 +485,7 @@ def _get_all_slots(
             branch_open=branch_open,
             branch_close=branch_close,
             tz=tz,
+            duration_minutes=duration_minutes,
         )
         all_slots.extend(employee_slots)
 
@@ -484,6 +504,7 @@ def _get_employee_slots(
     branch_open: datetime,
     branch_close: datetime,
     tz,
+    duration_minutes: int,
 ) -> list[EmployeeSlot]:
     """
     Generate all valid slots for one employee on one date.
@@ -540,7 +561,7 @@ def _get_employee_slots(
     earliest_bookable = datetime.now(tz) + timedelta(minutes=MIN_ADVANCE_MINUTES)
 
     # generate candidate slots
-    service_duration = timedelta(minutes=service.duration_minutes)
+    service_duration = timedelta(minutes=duration_minutes)
     slot_interval = timedelta(minutes=SLOT_INTERVAL_MINUTES)
 
     valid_slots = []
@@ -625,6 +646,7 @@ def _empty_response(
     service_id: int,
     requested_date: date,
     service,
+    duration_minutes: int,
 ) -> AvailabilityResponse:
     """Return an empty availability response."""
     return AvailabilityResponse(
@@ -632,7 +654,7 @@ def _empty_response(
         service_id=service_id,
         date=requested_date,
         service_name=service.name,
-        duration_minutes=service.duration_minutes,
+        duration_minutes=duration_minutes,
         available_slots=[],
         total_slots=0,
     )

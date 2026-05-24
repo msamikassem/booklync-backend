@@ -42,20 +42,15 @@ def get_availability(
     service_id: int = Query(..., description="Which service (determines duration)"),
     date: date = Query(..., description="Date to check — YYYY-MM-DD"),
     employee_id: Optional[int] = Query(None, description="Optional — filter to specific employee"),
+    variation_id: Optional[int] = Query(None, description="Optional — use this variation's duration for slot generation"),
     db: Session = Depends(get_db),
     current_business: Business = Depends(get_current_business),
 ):
     """
     Returns all available booking slots for a given date and service.
 
-    Excludes:
-    - Slots in the past
-    - Slots within the minimum advance booking time (default 60 min)
-    - Slots on days the branch is closed
-    - Slots during branch-wide days off
-    - Slots where the employee is on personal leave
-    - Slots that overlap existing appointments
-    - Slots that overlap recurring blocked times
+    For variation-based services, pass variation_id to use that variation's duration.
+    Without variation_id the shortest active variation duration is used.
     """
     return availability_service.get_availability(
         db=db,
@@ -64,6 +59,7 @@ def get_availability(
         requested_date=date,
         employee_id=employee_id,
         business_id=current_business.id,
+        variation_id=variation_id,
     )
 
 
@@ -82,18 +78,13 @@ def check_slot(
     service_id: int = Query(..., description="Which service"),
     start_time: datetime = Query(..., description="Requested start time — ISO 8601 with timezone e.g. 2025-06-16T10:00:00+00:00"),
     employee_id: Optional[int] = Query(None, description="Optional — specific employee"),
+    variation_id: Optional[int] = Query(None, description="Optional — use this variation's duration"),
     db: Session = Depends(get_db),
     current_business: Business = Depends(get_current_business),
 ):
     """
     Check if a specific date and time is available for booking.
-
-    If available:
-        Returns available=true and the slot details.
-
-    If not available:
-        Returns available=false and the closest available slots
-        on each side of the requested time (default 3 before, 3 after).
+    For variation-based services, pass variation_id to use the correct duration.
     """
     return availability_service.check_slot(
         db=db,
@@ -102,6 +93,7 @@ def check_slot(
         requested_start=start_time,
         employee_id=employee_id,
         business_id=current_business.id,
+        variation_id=variation_id,
     )
 
 
@@ -120,14 +112,12 @@ def get_public_availability(
     service_id: int = Query(..., description="Which service"),
     date: date = Query(..., description="Date to check — YYYY-MM-DD"),
     employee_id: Optional[int] = Query(None, description="Optional — specific employee"),
+    variation_id: Optional[int] = Query(None, description="Optional — use this variation's duration"),
     db: Session = Depends(get_db),
 ):
     """
     Public availability check — no authentication required.
-
     Used by the customer-facing booking page.
-    Only works for active agents and active services.
-    Same slot logic as the authenticated endpoint.
     """
     return availability_service.get_public_availability(
         db=db,
@@ -135,6 +125,7 @@ def get_public_availability(
         service_id=service_id,
         requested_date=date,
         employee_id=employee_id,
+        variation_id=variation_id,
     )
 
 

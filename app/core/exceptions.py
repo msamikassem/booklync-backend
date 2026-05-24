@@ -52,8 +52,8 @@ class ConflictException(AppException):
 
 class SlotUnavailableException(AppException):
     """Requested time slot is not available for booking."""
-    def __init__(self, detail: str = "The requested time slot is not available"):
-        super().__init__(detail=detail, code="SLOT_UNAVAILABLE", status_code=409)
+    def __init__(self, detail: str = "The requested time slot is not available", code: str = "SLOT_UNAVAILABLE"):
+        super().__init__(detail=detail, code=code, status_code=409)
 
 
 class BusinessInactiveException(AppException):

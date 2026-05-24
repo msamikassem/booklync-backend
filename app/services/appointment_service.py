@@ -26,6 +26,9 @@ from app.models.models import (
     Customer,
     Employee,
     Service,
+    ServiceVariation,
+    DayOff,
+    BlockedTime,
 )
 from app.schemas.appointment import (
     AppointmentCreate,
@@ -105,6 +108,45 @@ def _check_no_overlap(
         )
 
 
+def _check_no_blocked_time(
+    db: Session,
+    employee_id: int,
+    start_time: datetime,
+    end_time: datetime,
+    agent: AIAgent,
+) -> None:
+    """
+    Raise SlotUnavailableException if the appointment overlaps a recurring
+    blocked time (break) for this employee.
+
+    Blocked times are stored in the agent's local timezone as day_of_week +
+    start_time/end_time, so we localise the appointment date before comparing.
+    """
+    tz = _get_tz(agent)
+    start_local = _ensure_tz_aware(start_time, tz).astimezone(tz)
+    appt_date = start_local.date()
+    day_of_week = appt_date.weekday()  # Mon=0 .. Sun=6
+
+    blocked_times = db.query(BlockedTime).filter(
+        BlockedTime.employee_id == employee_id,
+        BlockedTime.day_of_week == day_of_week,
+    ).all()
+
+    for block in blocked_times:
+        block_start = tz.localize(datetime.combine(appt_date, block.start_time))
+        block_end   = tz.localize(datetime.combine(appt_date, block.end_time))
+        start_aware = _ensure_tz_aware(start_time, tz)
+        end_aware   = _ensure_tz_aware(end_time, tz)
+        if start_aware < block_end and end_aware > block_start:
+            raise SlotUnavailableException(
+                detail=(
+                    f"This time overlaps with a scheduled break "
+                    f"({block.start_time.strftime('%H:%M')}–{block.end_time.strftime('%H:%M')})"
+                ),
+                code="BREAK_CONFLICT",
+            )
+
+
 def _build_detail(appointment, agent, customer, employee, service) -> dict:
     """
     Build the full appointment detail dict.
@@ -141,6 +183,8 @@ def _build_detail(appointment, agent, customer, employee, service) -> dict:
         "employee_name": employee.name if employee else "Unknown",
         "service_id": appointment.service_id,
         "service_name": service.name if service else None,
+        "variation_id": appointment.variation_id,
+        "variation_name": appointment.variation.name if appointment.variation else None,
         # UTC times — use for all calculations
         "start_time": appointment.start_time,
         "end_time": appointment.end_time,
@@ -211,8 +255,27 @@ def create_appointment(
     if not service:
         raise NotFoundException(detail="Service not found or inactive")
 
+    # Step 4b — verify variation (if provided) and resolve duration
+    variation = None
+    if data.variation_id:
+        variation = db.query(ServiceVariation).filter(
+            ServiceVariation.id == data.variation_id,
+            ServiceVariation.service_id == data.service_id,
+            ServiceVariation.active == True,
+        ).first()
+        if not variation:
+            raise NotFoundException(detail="Service variation not found or inactive")
+        duration_minutes = variation.duration_minutes
+    elif service.duration_minutes:
+        duration_minutes = service.duration_minutes
+    else:
+        raise ConflictException(
+            detail="This service requires a variation to be selected",
+            code="VARIATION_REQUIRED"
+        )
+
     # Step 5 — calculate end_time
-    end_time = data.start_time + timedelta(minutes=service.duration_minutes)
+    end_time = data.start_time + timedelta(minutes=duration_minutes)
 
     # Step 6 — check not in the past
     tz = _get_tz(agent)
@@ -225,7 +288,37 @@ def create_appointment(
             code="PAST_APPOINTMENT"
         )
 
-    # Step 7 — check no overlap
+    # Step 7 — check branch-wide day off
+    appt_date = start_aware.date()
+    branch_day_off = db.query(DayOff).filter(
+        DayOff.agent_id == data.agent_id,
+        DayOff.employee_id == None,
+        DayOff.start_date <= appt_date,
+        DayOff.end_date >= appt_date,
+    ).first()
+    if branch_day_off:
+        raise SlotUnavailableException(
+            detail=f"Branch is closed on this date ({branch_day_off.name or 'day off'})",
+            code="BRANCH_DAY_OFF"
+        )
+
+    # Step 7b — check employee personal day off
+    emp_day_off = db.query(DayOff).filter(
+        DayOff.agent_id == data.agent_id,
+        DayOff.employee_id == data.employee_id,
+        DayOff.start_date <= appt_date,
+        DayOff.end_date >= appt_date,
+    ).first()
+    if emp_day_off:
+        raise SlotUnavailableException(
+            detail=f"Employee has a day off on this date ({emp_day_off.name or 'day off'})",
+            code="EMPLOYEE_DAY_OFF"
+        )
+
+    # Step 7c — check no blocked time (break) conflict
+    _check_no_blocked_time(db, data.employee_id, data.start_time, end_time, agent)
+
+    # Step 8 — check no overlap
     _check_no_overlap(db, data.employee_id, data.start_time, end_time)
 
     # Step 8 — determine default status
@@ -240,6 +333,7 @@ def create_appointment(
         customer_id=data.customer_id,
         employee_id=data.employee_id,
         service_id=data.service_id,
+        variation_id=data.variation_id,
         start_time=data.start_time,
         end_time=end_time,
         status=default_status,
@@ -395,6 +489,7 @@ def update_appointment(
 
     # check for conflicts if employee or time changed
     if data.employee_id or data.start_time:
+        _check_no_blocked_time(db, new_employee_id, new_start_time, new_end_time, agent)
         _check_no_overlap(
             db, new_employee_id, new_start_time, new_end_time,
             exclude_appointment_id=appointment_id

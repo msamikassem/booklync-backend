@@ -380,3 +380,81 @@ def delete_day_off(
     return employee_service.delete_day_off(
         db, employee_id, agent_id, day_off_id, current_business.id
     )
+
+# ─── Employee Capabilities ──────────────────────────────────────────────────
+
+from typing import Optional
+from pydantic import BaseModel
+
+
+from decimal import Decimal as _Decimal
+
+class CapabilityCreate(BaseModel):
+    title_id: Optional[int] = None
+    service_id: Optional[int] = None
+    variation_id: Optional[int] = None
+    extra_price: _Decimal = _Decimal("0")
+
+
+class CapabilityResponse(BaseModel):
+    id: int
+    employee_id: int
+    title_id: Optional[int] = None
+    service_id: Optional[int] = None
+    variation_id: Optional[int] = None
+    extra_price: _Decimal = _Decimal("0")
+
+    model_config = {"from_attributes": True}
+
+
+@router.get(
+    "/{employee_id}/capabilities",
+    response_model=list[CapabilityResponse],
+    summary="List all capabilities for an employee",
+)
+def list_capabilities(
+    employee_id: int,
+    agent_id: int = Query(...),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    return employee_service.get_capabilities(db, employee_id, agent_id, current_business.id)
+
+
+@router.post(
+    "/{employee_id}/capabilities",
+    response_model=CapabilityResponse,
+    status_code=201,
+    summary="Add a capability (title, service, or variation level)",
+)
+def add_capability(
+    employee_id: int,
+    data: CapabilityCreate,
+    agent_id: int = Query(...),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    return employee_service.add_capability(
+        db, employee_id, agent_id, current_business.id,
+        title_id=data.title_id,
+        service_id=data.service_id,
+        variation_id=data.variation_id,
+        extra_price=data.extra_price,
+    )
+
+
+@router.delete(
+    "/{employee_id}/capabilities/{capability_id}",
+    response_model=MessageResponse,
+    summary="Remove a capability from an employee",
+)
+def remove_capability(
+    employee_id: int,
+    capability_id: int,
+    agent_id: int = Query(...),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    return employee_service.remove_capability(
+        db, employee_id, agent_id, capability_id, current_business.id
+    )

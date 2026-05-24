@@ -18,6 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Float,
     create_engine,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -133,6 +134,7 @@ class AIAgent(Base):
     business          = relationship("Business",             back_populates="agents")
     employees         = relationship("Employee",             back_populates="agent",    cascade="all, delete")
     business_hours    = relationship("BusinessHour",         back_populates="agent",    cascade="all, delete")
+    service_titles    = relationship("ServiceTitle",          back_populates="agent",    cascade="all, delete")
     services          = relationship("Service",              back_populates="agent",    cascade="all, delete")
     conversation_logs = relationship("ConversationLog",      back_populates="agent",    cascade="all, delete")
     appointments      = relationship("Appointment",          back_populates="agent",    cascade="all, delete")
@@ -170,7 +172,7 @@ class Employee(Base):
     agent         = relationship("AIAgent",   back_populates="employees")
     working_hours = relationship("EmployeeWorkingHour", back_populates="employee", cascade="all, delete")
     blocked_times = relationship("BlockedTime",         back_populates="employee", cascade="all, delete")
-    services      = relationship("EmployeeService",     back_populates="employee", cascade="all, delete")
+    capabilities  = relationship("EmployeeCapability",  back_populates="employee", cascade="all, delete")
     appointments  = relationship("Appointment",         back_populates="employee", cascade="all, delete")
     # personal days off for this employee.
     days_off      = relationship(
@@ -288,49 +290,122 @@ class BusinessHour(Base):
 #
 # CHANGE 11: Added updated_at.
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ServiceTitle
+# A grouping label for services — e.g. "Haircut", "Coloring".
+# Services optionally belong to a title; titles have no bookable logic of their own.
+# ─────────────────────────────────────────────────────────────────────────────
+class ServiceTitle(Base):
+    __tablename__ = "service_titles"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    agent_id   = Column(Integer, ForeignKey("ai_agents.id"), nullable=False)
+    name       = Column(Text, nullable=False)
+    active     = Column(Boolean, nullable=False, default=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+
+    agent    = relationship("AIAgent",   back_populates="service_titles")
+    services = relationship("Service",   back_populates="title", cascade="all, delete")
+
+
 class Service(Base):
     __tablename__ = "services"
 
     id               = Column(Integer, primary_key=True, autoincrement=True)
     agent_id         = Column(Integer, ForeignKey("ai_agents.id"), nullable=False)
+    # Optional grouping — null means the service is uncategorised
+    title_id         = Column(Integer, ForeignKey("service_titles.id"), nullable=True)
     name             = Column(Text, nullable=False)
     description      = Column(Text, nullable=True)
-    duration_minutes = Column(Integer, nullable=False)
-    # Numeric (not DECIMAL alias) is the correct SQLAlchemy type for money.
-    price            = Column(Numeric(10, 2), nullable=False)
+    # Null when the service has variations (price/duration live on each variation instead)
+    duration_minutes = Column(Integer, nullable=True)
+    price            = Column(Numeric(10, 2), nullable=True)
     active           = Column(Boolean, nullable=False, default=True)
+    sort_order       = Column(Integer, nullable=False, default=0)
     updated_at       = Column(
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
     )
 
-    agent             = relationship("AIAgent",          back_populates="services")
-    employee_services = relationship("EmployeeService",  back_populates="service", cascade="all, delete")
-    appointments      = relationship("Appointment",      back_populates="service", cascade="all, delete")
+    agent             = relationship("AIAgent",           back_populates="services")
+    title             = relationship("ServiceTitle",       back_populates="services")
+    variations        = relationship("ServiceVariation",   back_populates="service", cascade="all, delete")
+    capabilities      = relationship("EmployeeCapability", back_populates="service",  cascade="all, delete",
+                                    primaryjoin="EmployeeCapability.service_id==Service.id",
+                                    foreign_keys="EmployeeCapability.service_id")
+    appointments      = relationship("Appointment",        back_populates="service", cascade="all, delete")
 
     __table_args__ = (
-        CheckConstraint("duration_minutes > 0",  name="ck_service_duration_positive"),
-        CheckConstraint("price >= 0",            name="ck_service_price_non_negative"),
+        CheckConstraint("duration_minutes IS NULL OR duration_minutes > 0", name="ck_service_duration_positive"),
+        CheckConstraint("price IS NULL OR price >= 0",                      name="ck_service_price_non_negative"),
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EmployeeService
-# Many-to-many: which services each employee can perform.
+# ServiceVariation
+# An optional sub-option of a Service, each with its own price and duration.
+# e.g. Service "Buzz Cut" → Variation "Fade" ($30, 30 min), "Skin Fade" ($40, 45 min).
+# If a service has no variations it carries price/duration directly.
 # ─────────────────────────────────────────────────────────────────────────────
-class EmployeeService(Base):
-    __tablename__ = "employee_services"
+class ServiceVariation(Base):
+    __tablename__ = "service_variations"
 
-    id          = Column(Integer, primary_key=True, autoincrement=True)
-    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False)
-    service_id  = Column(Integer, ForeignKey("services.id"),  nullable=False)
+    id               = Column(Integer, primary_key=True, autoincrement=True)
+    service_id       = Column(Integer, ForeignKey("services.id"), nullable=False)
+    name             = Column(Text, nullable=False)
+    price            = Column(Numeric(10, 2), nullable=False)
+    duration_minutes = Column(Integer, nullable=False)
+    active           = Column(Boolean, nullable=False, default=True)
+    sort_order       = Column(Integer, nullable=False, default=0)
 
-    employee = relationship("Employee", back_populates="services")
-    service  = relationship("Service",  back_populates="employee_services")
+    service = relationship("Service", back_populates="variations")
+    appointments = relationship("Appointment", back_populates="variation", cascade="all, delete")
 
     __table_args__ = (
-        UniqueConstraint("employee_id", "service_id", name="uq_employee_service"),
+        CheckConstraint("duration_minutes > 0", name="ck_variation_duration_positive"),
+        CheckConstraint("price >= 0",           name="ck_variation_price_non_negative"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EmployeeCapability
+# Grants an employee the ability to perform work at one of three levels:
+#   - title_id set    → employee can do every service + variation under that title
+#   - service_id set  → employee can do that service and all its variations
+#   - variation_id set → employee can do only that specific variation
+# Exactly one FK must be non-null (enforced by CHECK constraint).
+# ─────────────────────────────────────────────────────────────────────────────
+class EmployeeCapability(Base):
+    __tablename__ = "employee_capabilities"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    employee_id  = Column(Integer, ForeignKey("employees.id"),          nullable=False)
+    title_id     = Column(Integer, ForeignKey("service_titles.id"),     nullable=True)
+    service_id   = Column(Integer, ForeignKey("services.id"),           nullable=True)
+    variation_id = Column(Integer, ForeignKey("service_variations.id"), nullable=True)
+    extra_price  = Column(Numeric(10, 2), nullable=False, default=0)
+
+    employee  = relationship("Employee",         back_populates="capabilities")
+    title     = relationship("ServiceTitle")
+    service   = relationship("Service",          back_populates="capabilities",
+                             primaryjoin="EmployeeCapability.service_id==Service.id",
+                             foreign_keys="[EmployeeCapability.service_id]")
+    variation = relationship("ServiceVariation")
+
+    __table_args__ = (
+        # Exactly one of the three FKs must be set
+        CheckConstraint(
+            "(title_id IS NOT NULL)::int + (service_id IS NOT NULL)::int + (variation_id IS NOT NULL)::int = 1",
+            name="ck_employee_capability_exactly_one",
+        ),
+        # Prevent duplicate grants at each level
+        Index("uix_emp_cap_title",     "employee_id", "title_id",     unique=True,
+              postgresql_where=text("title_id IS NOT NULL")),
+        Index("uix_emp_cap_service",   "employee_id", "service_id",   unique=True,
+              postgresql_where=text("service_id IS NOT NULL")),
+        Index("uix_emp_cap_variation", "employee_id", "variation_id", unique=True,
+              postgresql_where=text("variation_id IS NOT NULL")),
     )
 
 
@@ -402,8 +477,9 @@ class Appointment(Base):
     agent_id    = Column(Integer, ForeignKey("ai_agents.id"),  nullable=False)
     customer_id = Column(Integer, ForeignKey("customers.id"),  nullable=False)
     employee_id = Column(Integer, ForeignKey("employees.id"),  nullable=False)
-    service_id  = Column(Integer, ForeignKey("services.id"),   nullable=True)
-    start_time  = Column(DateTime(timezone=True), nullable=False)
+    service_id   = Column(Integer, ForeignKey("services.id"),            nullable=True)
+    variation_id = Column(Integer, ForeignKey("service_variations.id"),  nullable=True)
+    start_time   = Column(DateTime(timezone=True), nullable=False)
     end_time    = Column(DateTime(timezone=True), nullable=False)
     status      = Column(
         PgEnum(AppointmentStatusEnum, name="appointment_status_enum", create_type=True),
@@ -417,10 +493,11 @@ class Appointment(Base):
     note        = Column(Text)
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
-    agent    = relationship("AIAgent",   back_populates="appointments")
-    customer = relationship("Customer",  back_populates="appointments")
-    employee = relationship("Employee",  back_populates="appointments")
-    service  = relationship("Service",   back_populates="appointments")
+    agent     = relationship("AIAgent",          back_populates="appointments")
+    customer  = relationship("Customer",         back_populates="appointments")
+    employee  = relationship("Employee",         back_populates="appointments")
+    service   = relationship("Service",          back_populates="appointments")
+    variation = relationship("ServiceVariation", back_populates="appointments")
 
     __table_args__ = (
         CheckConstraint("end_time > start_time", name="ck_appointment_time_order"),

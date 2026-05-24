@@ -1,11 +1,11 @@
 """
 app/api/v1/endpoints/services.py
 
-Service management routes.
+Service management routes — full hierarchy:
+    ServiceTitle → Service → ServiceVariation
 
-All endpoints are protected — require a valid JWT token.
-Uses agent_id as a query parameter to verify the ownership chain:
-    business → agent → service
+All endpoints are protected (JWT required).
+Ownership chain verified on every operation: business → agent → resource.
 """
 
 from fastapi import APIRouter, Depends, Query
@@ -15,17 +15,171 @@ from app.db.session import get_db
 from app.core.dependencies import get_current_business
 from app.models.models import Business
 from app.schemas.service import (
+    # Title
+    ServiceTitleCreate,
+    ServiceTitleUpdate,
+    ServiceTitleResponse,
+    # Service
     ServiceCreate,
     ServiceUpdate,
-    AssignEmployeeRequest,
     ServiceResponse,
     ServiceListResponse,
+    # Variation
+    ServiceVariationCreate,
+    ServiceVariationUpdate,
+    ServiceVariationResponse,
+    # Catalogue
+    ServiceCatalogueResponse,
+    # List responses
+    ServiceTitleListResponse,
+    ServiceVariationListResponse,
+    # Employee assignment
+    AssignEmployeeRequest,
     ServiceEmployeesResponse,
+    # Generic
     MessageResponse,
 )
 from app.services import service_service
 
 router = APIRouter()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CATALOGUE  (must be before /{service_id} routes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/catalogue",
+    response_model=ServiceCatalogueResponse,
+    status_code=200,
+    summary="Get the full service catalogue for an agent",
+)
+def get_catalogue(
+    agent_id: int = Query(..., description="Which agent to load the catalogue for"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    """
+    Returns all service titles with their nested services and variations,
+    plus any services that are not under a title (uncategorised).
+    """
+    return service_service.get_catalogue(db, agent_id, current_business.id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SERVICE TITLE CRUD
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/titles/",
+    response_model=ServiceTitleResponse,
+    status_code=201,
+    summary="Create a service title",
+)
+def create_title(
+    data: ServiceTitleCreate,
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    """Create a new title group (e.g. 'Haircut') under an agent."""
+    return service_service.create_title(db, data, current_business.id)
+
+
+@router.get(
+    "/titles/",
+    response_model=ServiceTitleListResponse,
+    status_code=200,
+    summary="List all titles for an agent",
+)
+def get_titles(
+    agent_id: int = Query(..., description="Which agent to list titles for"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    """Returns all service titles for a specific agent, ordered by sort_order."""
+    return service_service.get_titles(db, agent_id, current_business.id)
+
+
+@router.get(
+    "/titles/{title_id}",
+    response_model=ServiceTitleResponse,
+    status_code=200,
+    summary="Get a service title",
+)
+def get_title(
+    title_id: int,
+    agent_id: int = Query(..., description="The agent this title belongs to"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    """Get a single title by id."""
+    return service_service.get_title(db, title_id, agent_id, current_business.id)
+
+
+@router.put(
+    "/titles/{title_id}",
+    response_model=ServiceTitleResponse,
+    status_code=200,
+    summary="Update a service title",
+)
+def update_title(
+    title_id: int,
+    data: ServiceTitleUpdate,
+    agent_id: int = Query(..., description="The agent this title belongs to"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    """Update name or sort_order of a title. Only send fields you want to change."""
+    return service_service.update_title(db, title_id, agent_id, data, current_business.id)
+
+
+@router.delete(
+    "/titles/{title_id}",
+    response_model=MessageResponse,
+    status_code=200,
+    summary="Delete a service title",
+)
+def delete_title(
+    title_id: int,
+    agent_id: int = Query(..., description="The agent this title belongs to"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    """
+    Permanently delete a title.
+    All services (and their variations) under this title are also deleted.
+    """
+    return service_service.delete_title(db, title_id, agent_id, current_business.id)
+
+
+@router.patch(
+    "/titles/{title_id}/activate",
+    response_model=ServiceTitleResponse,
+    status_code=200,
+    summary="Activate a service title",
+)
+def activate_title(
+    title_id: int,
+    agent_id: int = Query(..., description="The agent this title belongs to"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    return service_service.activate_title(db, title_id, agent_id, current_business.id)
+
+
+@router.patch(
+    "/titles/{title_id}/deactivate",
+    response_model=ServiceTitleResponse,
+    status_code=200,
+    summary="Deactivate a service title",
+)
+def deactivate_title(
+    title_id: int,
+    agent_id: int = Query(..., description="The agent this title belongs to"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    return service_service.deactivate_title(db, title_id, agent_id, current_business.id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -36,7 +190,7 @@ router = APIRouter()
     "/",
     response_model=ServiceResponse,
     status_code=201,
-    summary="Create a new service",
+    summary="Create a service",
 )
 def create_service(
     data: ServiceCreate,
@@ -44,9 +198,16 @@ def create_service(
     current_business: Business = Depends(get_current_business),
 ):
     """
-    Create a new service under an agent.
-    The agent_id is required in the request body.
-    Services start active by default.
+    Create a new service.
+
+    Flat-rate service (no variations):
+        { "name": "Buzz Cut", "price": 25.00, "duration_minutes": 30, ... }
+
+    Variation-based service (no flat price):
+        { "name": "Buzz Cut", "variations": [{ "name": "Fade", "price": 30, "duration_minutes": 45 }], ... }
+
+    Providing both flat price/duration AND variations in the same request is not allowed.
+    Variations can also be added later via POST /{service_id}/variations/.
     """
     return service_service.create_service(db, data, current_business.id)
 
@@ -55,17 +216,14 @@ def create_service(
     "/",
     response_model=ServiceListResponse,
     status_code=200,
-    summary="Get all services for an agent",
+    summary="List all services for an agent",
 )
 def get_services(
-    agent_id: int = Query(..., description="The agent to get services for"),
+    agent_id: int = Query(..., description="Which agent to list services for"),
     db: Session = Depends(get_db),
     current_business: Business = Depends(get_current_business),
 ):
-    """
-    Returns all services for a specific agent.
-    Pass agent_id as a query parameter: /api/v1/services/?agent_id=1
-    """
+    """Returns all services (with their variations) for a specific agent."""
     return service_service.get_services(db, agent_id, current_business.id)
 
 
@@ -73,7 +231,7 @@ def get_services(
     "/{service_id}",
     response_model=ServiceResponse,
     status_code=200,
-    summary="Get one specific service",
+    summary="Get a service",
 )
 def get_service(
     service_id: int,
@@ -81,7 +239,7 @@ def get_service(
     db: Session = Depends(get_db),
     current_business: Business = Depends(get_current_business),
 ):
-    """Returns one service by id."""
+    """Get one service by id, including its variations."""
     return service_service.get_service(db, service_id, agent_id, current_business.id)
 
 
@@ -99,8 +257,8 @@ def update_service(
     current_business: Business = Depends(get_current_business),
 ):
     """
-    Update an existing service. All fields are optional.
-    Only send the fields you want to change.
+    Update a service. All fields are optional — only send what you want to change.
+    To move a service into a title, send title_id. To remove it from a title, send title_id=null.
     """
     return service_service.update_service(db, service_id, agent_id, data, current_business.id)
 
@@ -117,10 +275,7 @@ def delete_service(
     db: Session = Depends(get_db),
     current_business: Business = Depends(get_current_business),
 ):
-    """
-    Permanently delete a service.
-    Removes all employee assignments and linked appointments.
-    """
+    """Permanently delete a service and all its variations, assignments, and appointments."""
     return service_service.delete_service(db, service_id, agent_id, current_business.id)
 
 
@@ -136,7 +291,6 @@ def activate_service(
     db: Session = Depends(get_db),
     current_business: Business = Depends(get_current_business),
 ):
-    """Activate a service so it can be booked."""
     return service_service.activate_service(db, service_id, agent_id, current_business.id)
 
 
@@ -152,8 +306,125 @@ def deactivate_service(
     db: Session = Depends(get_db),
     current_business: Business = Depends(get_current_business),
 ):
-    """Deactivate a service so it cannot be booked."""
     return service_service.deactivate_service(db, service_id, agent_id, current_business.id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SERVICE VARIATION CRUD
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/{service_id}/variations/",
+    response_model=ServiceVariationResponse,
+    status_code=201,
+    summary="Add a variation to a service",
+)
+def add_variation(
+    service_id: int,
+    data: ServiceVariationCreate,
+    agent_id: int = Query(..., description="The agent this service belongs to"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    """
+    Add a variation (e.g. 'Fade') to an existing service.
+    If the service was flat-rate, its price and duration_minutes are cleared
+    and it becomes variation-based.
+    """
+    return service_service.add_variation(
+        db, service_id, agent_id, data, current_business.id
+    )
+
+
+@router.get(
+    "/{service_id}/variations/",
+    response_model=ServiceVariationListResponse,
+    status_code=200,
+    summary="List all variations of a service",
+)
+def get_variations(
+    service_id: int,
+    agent_id: int = Query(..., description="The agent this service belongs to"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    """Returns all variations for a service, ordered by sort_order."""
+    return service_service.get_variations(db, service_id, agent_id, current_business.id)
+
+
+@router.put(
+    "/{service_id}/variations/{variation_id}",
+    response_model=ServiceVariationResponse,
+    status_code=200,
+    summary="Update a variation",
+)
+def update_variation(
+    service_id: int,
+    variation_id: int,
+    data: ServiceVariationUpdate,
+    agent_id: int = Query(..., description="The agent this service belongs to"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    """Update a variation's name, price, duration, or sort_order."""
+    return service_service.update_variation(
+        db, variation_id, service_id, agent_id, data, current_business.id
+    )
+
+
+@router.delete(
+    "/{service_id}/variations/{variation_id}",
+    response_model=MessageResponse,
+    status_code=200,
+    summary="Delete a variation",
+)
+def delete_variation(
+    service_id: int,
+    variation_id: int,
+    agent_id: int = Query(..., description="The agent this service belongs to"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    """Permanently delete a variation."""
+    return service_service.delete_variation(
+        db, variation_id, service_id, agent_id, current_business.id
+    )
+
+
+@router.patch(
+    "/{service_id}/variations/{variation_id}/activate",
+    response_model=ServiceVariationResponse,
+    status_code=200,
+    summary="Activate a variation",
+)
+def activate_variation(
+    service_id: int,
+    variation_id: int,
+    agent_id: int = Query(..., description="The agent this service belongs to"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    return service_service.activate_variation(
+        db, variation_id, service_id, agent_id, current_business.id
+    )
+
+
+@router.patch(
+    "/{service_id}/variations/{variation_id}/deactivate",
+    response_model=ServiceVariationResponse,
+    status_code=200,
+    summary="Deactivate a variation",
+)
+def deactivate_variation(
+    service_id: int,
+    variation_id: int,
+    agent_id: int = Query(..., description="The agent this service belongs to"),
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    return service_service.deactivate_variation(
+        db, variation_id, service_id, agent_id, current_business.id
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -173,12 +444,10 @@ def assign_employee(
     db: Session = Depends(get_db),
     current_business: Business = Depends(get_current_business),
 ):
-    """
-    Assign an employee to a service — meaning they can perform it.
-    Both the service and employee must belong to the same agent.
-    """
+    """Grant a service-level capability to an employee."""
     return service_service.assign_employee(
-        db, service_id, agent_id, data.employee_id, current_business.id
+        db, service_id, agent_id, data.employee_id, current_business.id,
+        extra_price=data.extra_price,
     )
 
 
@@ -195,7 +464,7 @@ def unassign_employee(
     db: Session = Depends(get_db),
     current_business: Business = Depends(get_current_business),
 ):
-    """Remove an employee from a service — they can no longer perform it."""
+    """Remove a service-level capability from an employee."""
     return service_service.unassign_employee(
         db, service_id, agent_id, employee_id, current_business.id
     )
@@ -205,7 +474,7 @@ def unassign_employee(
     "/{service_id}/employees",
     response_model=ServiceEmployeesResponse,
     status_code=200,
-    summary="Get all employees assigned to a service",
+    summary="Get all employees who can perform a service",
 )
 def get_service_employees(
     service_id: int,
@@ -213,7 +482,10 @@ def get_service_employees(
     db: Session = Depends(get_db),
     current_business: Business = Depends(get_current_business),
 ):
-    """Returns all employees who can perform this service."""
+    """
+    Returns all employees capable of performing this service.
+    Includes employees granted at the variation, service, or title level.
+    """
     return service_service.get_service_employees(
         db, service_id, agent_id, current_business.id
     )
