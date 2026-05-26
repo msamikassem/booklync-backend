@@ -95,23 +95,27 @@ def create_agent(db: Session, data: AgentCreate, business_id: int) -> AIAgent:
 # GET ALL
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_agents(db: Session, business_id: int) -> dict:
+def get_agents(db: Session, business_id: int, restrict_to: set[int] | None = None) -> dict:
     """
-    Get all agents belonging to the logged in business.
+    Get agents belonging to the logged in business.
 
     A business can only see its own agents — never another business's agents.
-    This is enforced by filtering on business_id.
+    When `restrict_to` is provided (non-owner users), the result is further
+    limited to those branch ids, so a branch-scoped user only sees the branches
+    they are assigned to. Owners pass None and see every branch.
 
     Args:
         db:          database session
         business_id: id of the logged in business
+        restrict_to: optional set of agent ids the caller may see
 
     Returns:
         dict with agents list and total count
     """
-    agents = db.query(AIAgent).filter(
-        AIAgent.business_id == business_id
-    ).all()
+    query = db.query(AIAgent).filter(AIAgent.business_id == business_id)
+    if restrict_to is not None:
+        query = query.filter(AIAgent.id.in_(restrict_to))
+    agents = query.all()
 
     return {
         "agents": agents,

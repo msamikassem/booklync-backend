@@ -652,6 +652,18 @@ def get_appointment(
     return _build_detail(appointment, agent, customer, employee, service)
 
 
+def resolve_appointment_agent_id(db: Session, appointment_id: int, business_id: int) -> int:
+    """
+    Return the branch (agent) id of an appointment after verifying it belongs to
+    the tenant. Lets the router enforce branch-level RBAC before mutating.
+    """
+    appointment = db.query(Appointment).filter(Appointment.id == appointment_id).first()
+    if not appointment:
+        raise NotFoundException(detail="Appointment not found")
+    _get_agent_for_business(db, appointment.agent_id, business_id)
+    return appointment.agent_id
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE
 # ─────────────────────────────────────────────────────────────────────────────

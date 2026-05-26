@@ -12,8 +12,8 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.core.dependencies import get_current_business
-from app.models.models import Business
+from app.core import rbac
+from app.core.dependencies import CurrentUser, get_current_user
 from app.schemas.service import (
     # Title
     ServiceTitleCreate,
@@ -57,13 +57,14 @@ router = APIRouter()
 def get_catalogue(
     agent_id: int = Query(..., description="Which agent to load the catalogue for"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Returns all service titles with their nested services and variations,
     plus any services that are not under a title (uncategorised).
     """
-    return service_service.get_catalogue(db, agent_id, current_business.id)
+    current.require_branch(agent_id)
+    return service_service.get_catalogue(db, agent_id, current.business_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -79,10 +80,11 @@ def get_catalogue(
 def create_title(
     data: ServiceTitleCreate,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Create a new title group (e.g. 'Haircut') under an agent."""
-    return service_service.create_title(db, data, current_business.id)
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=data.agent_id)
+    return service_service.create_title(db, data, current.business_id)
 
 
 @router.get(
@@ -94,10 +96,11 @@ def create_title(
 def get_titles(
     agent_id: int = Query(..., description="Which agent to list titles for"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Returns all service titles for a specific agent, ordered by sort_order."""
-    return service_service.get_titles(db, agent_id, current_business.id)
+    current.require_branch(agent_id)
+    return service_service.get_titles(db, agent_id, current.business_id)
 
 
 @router.get(
@@ -110,10 +113,11 @@ def get_title(
     title_id: int,
     agent_id: int = Query(..., description="The agent this title belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Get a single title by id."""
-    return service_service.get_title(db, title_id, agent_id, current_business.id)
+    current.require_branch(agent_id)
+    return service_service.get_title(db, title_id, agent_id, current.business_id)
 
 
 @router.put(
@@ -127,10 +131,11 @@ def update_title(
     data: ServiceTitleUpdate,
     agent_id: int = Query(..., description="The agent this title belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Update name or sort_order of a title. Only send fields you want to change."""
-    return service_service.update_title(db, title_id, agent_id, data, current_business.id)
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
+    return service_service.update_title(db, title_id, agent_id, data, current.business_id)
 
 
 @router.delete(
@@ -143,13 +148,14 @@ def delete_title(
     title_id: int,
     agent_id: int = Query(..., description="The agent this title belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Permanently delete a title.
     All services (and their variations) under this title are also deleted.
     """
-    return service_service.delete_title(db, title_id, agent_id, current_business.id)
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
+    return service_service.delete_title(db, title_id, agent_id, current.business_id)
 
 
 @router.patch(
@@ -162,9 +168,10 @@ def activate_title(
     title_id: int,
     agent_id: int = Query(..., description="The agent this title belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
-    return service_service.activate_title(db, title_id, agent_id, current_business.id)
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
+    return service_service.activate_title(db, title_id, agent_id, current.business_id)
 
 
 @router.patch(
@@ -177,9 +184,10 @@ def deactivate_title(
     title_id: int,
     agent_id: int = Query(..., description="The agent this title belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
-    return service_service.deactivate_title(db, title_id, agent_id, current_business.id)
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
+    return service_service.deactivate_title(db, title_id, agent_id, current.business_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -195,7 +203,7 @@ def deactivate_title(
 def create_service(
     data: ServiceCreate,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Create a new service.
@@ -209,7 +217,8 @@ def create_service(
     Providing both flat price/duration AND variations in the same request is not allowed.
     Variations can also be added later via POST /{service_id}/variations/.
     """
-    return service_service.create_service(db, data, current_business.id)
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=data.agent_id)
+    return service_service.create_service(db, data, current.business_id)
 
 
 @router.get(
@@ -221,10 +230,11 @@ def create_service(
 def get_services(
     agent_id: int = Query(..., description="Which agent to list services for"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Returns all services (with their variations) for a specific agent."""
-    return service_service.get_services(db, agent_id, current_business.id)
+    current.require_branch(agent_id)
+    return service_service.get_services(db, agent_id, current.business_id)
 
 
 @router.get(
@@ -237,10 +247,11 @@ def get_service(
     service_id: int,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Get one service by id, including its variations."""
-    return service_service.get_service(db, service_id, agent_id, current_business.id)
+    current.require_branch(agent_id)
+    return service_service.get_service(db, service_id, agent_id, current.business_id)
 
 
 @router.put(
@@ -254,13 +265,14 @@ def update_service(
     data: ServiceUpdate,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Update a service. All fields are optional — only send what you want to change.
     To move a service into a title, send title_id. To remove it from a title, send title_id=null.
     """
-    return service_service.update_service(db, service_id, agent_id, data, current_business.id)
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
+    return service_service.update_service(db, service_id, agent_id, data, current.business_id)
 
 
 @router.delete(
@@ -273,10 +285,11 @@ def delete_service(
     service_id: int,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Permanently delete a service and all its variations, assignments, and appointments."""
-    return service_service.delete_service(db, service_id, agent_id, current_business.id)
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
+    return service_service.delete_service(db, service_id, agent_id, current.business_id)
 
 
 @router.patch(
@@ -289,9 +302,10 @@ def activate_service(
     service_id: int,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
-    return service_service.activate_service(db, service_id, agent_id, current_business.id)
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
+    return service_service.activate_service(db, service_id, agent_id, current.business_id)
 
 
 @router.patch(
@@ -304,9 +318,10 @@ def deactivate_service(
     service_id: int,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
-    return service_service.deactivate_service(db, service_id, agent_id, current_business.id)
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
+    return service_service.deactivate_service(db, service_id, agent_id, current.business_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -324,15 +339,16 @@ def add_variation(
     data: ServiceVariationCreate,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Add a variation (e.g. 'Fade') to an existing service.
     If the service was flat-rate, its price and duration_minutes are cleared
     and it becomes variation-based.
     """
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
     return service_service.add_variation(
-        db, service_id, agent_id, data, current_business.id
+        db, service_id, agent_id, data, current.business_id
     )
 
 
@@ -346,10 +362,11 @@ def get_variations(
     service_id: int,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Returns all variations for a service, ordered by sort_order."""
-    return service_service.get_variations(db, service_id, agent_id, current_business.id)
+    current.require_branch(agent_id)
+    return service_service.get_variations(db, service_id, agent_id, current.business_id)
 
 
 @router.put(
@@ -364,11 +381,12 @@ def update_variation(
     data: ServiceVariationUpdate,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Update a variation's name, price, duration, or sort_order."""
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
     return service_service.update_variation(
-        db, variation_id, service_id, agent_id, data, current_business.id
+        db, variation_id, service_id, agent_id, data, current.business_id
     )
 
 
@@ -383,11 +401,12 @@ def delete_variation(
     variation_id: int,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Permanently delete a variation."""
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
     return service_service.delete_variation(
-        db, variation_id, service_id, agent_id, current_business.id
+        db, variation_id, service_id, agent_id, current.business_id
     )
 
 
@@ -402,10 +421,11 @@ def activate_variation(
     variation_id: int,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
     return service_service.activate_variation(
-        db, variation_id, service_id, agent_id, current_business.id
+        db, variation_id, service_id, agent_id, current.business_id
     )
 
 
@@ -420,10 +440,11 @@ def deactivate_variation(
     variation_id: int,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
     return service_service.deactivate_variation(
-        db, variation_id, service_id, agent_id, current_business.id
+        db, variation_id, service_id, agent_id, current.business_id
     )
 
 
@@ -442,11 +463,12 @@ def assign_employee(
     data: AssignEmployeeRequest,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Grant a service-level capability to an employee."""
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
     return service_service.assign_employee(
-        db, service_id, agent_id, data.employee_id, current_business.id,
+        db, service_id, agent_id, data.employee_id, current.business_id,
         extra_price=data.extra_price,
     )
 
@@ -462,11 +484,12 @@ def unassign_employee(
     employee_id: int,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Remove a service-level capability from an employee."""
+    current.require(rbac.P_MANAGE_SERVICES, agent_id=agent_id)
     return service_service.unassign_employee(
-        db, service_id, agent_id, employee_id, current_business.id
+        db, service_id, agent_id, employee_id, current.business_id
     )
 
 
@@ -480,12 +503,13 @@ def get_service_employees(
     service_id: int,
     agent_id: int = Query(..., description="The agent this service belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Returns all employees capable of performing this service.
     Includes employees granted at the variation, service, or title level.
     """
+    current.require_branch(agent_id)
     return service_service.get_service_employees(
-        db, service_id, agent_id, current_business.id
+        db, service_id, agent_id, current.business_id
     )

@@ -15,9 +15,10 @@ import httpx
 
 from app.db.session import get_db
 from app.core.config import settings
-from app.core.dependencies import get_current_business
+from app.core import rbac
+from app.core.dependencies import CurrentUser, get_current_user
 from app.core.exceptions import NotFoundException, ConflictException
-from app.models.models import AIAgent, Business
+from app.models.models import AIAgent
 from app.schemas.agent import (
     AgentCreate,
     AgentUpdate,
@@ -54,13 +55,14 @@ router = APIRouter()
 def create_agent(
     data: AgentCreate,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Create a new AI agent for the logged in business.
     The agent starts inactive and must be activated after configuration.
     """
-    return agent_service.create_agent(db, data, current_business.id)
+    current.require(rbac.P_MANAGE_BRANCHES)
+    return agent_service.create_agent(db, data, current.business_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,13 +77,14 @@ def create_agent(
 )
 def get_agents(
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
-    Returns all agents belonging to the logged in business.
-    A business can never see another business's agents.
+    Returns the branches the caller can access. Owners see every branch;
+    branch-scoped users see only the branches they are assigned to.
     """
-    return agent_service.get_agents(db, current_business.id)
+    restrict_to = None if current.is_owner else current.accessible_agent_ids
+    return agent_service.get_agents(db, current.business_id, restrict_to=restrict_to)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -97,13 +100,14 @@ def get_agents(
 def get_agent(
     agent_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Returns one agent by id.
-    Returns 403 if the agent belongs to a different business.
+    Returns 403 if the caller cannot access this branch.
     """
-    return agent_service.get_agent(db, agent_id, current_business.id)
+    current.require_branch(agent_id)
+    return agent_service.get_agent(db, agent_id, current.business_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -120,13 +124,14 @@ def update_agent(
     agent_id: int,
     data: AgentUpdate,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Update an existing agent. All fields are optional.
     Only send the fields you want to change.
     """
-    return agent_service.update_agent(db, agent_id, data, current_business.id)
+    current.require(rbac.P_MANAGE_BRANCHES, agent_id=agent_id)
+    return agent_service.update_agent(db, agent_id, data, current.business_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -142,14 +147,15 @@ def update_agent(
 def delete_agent(
     agent_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Permanently delete an agent and all its related data.
     This includes employees, services, appointments, and conversation logs.
     This action cannot be undone.
     """
-    return agent_service.delete_agent(db, agent_id, current_business.id)
+    current.require(rbac.P_MANAGE_BRANCHES, agent_id=agent_id)
+    return agent_service.delete_agent(db, agent_id, current.business_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,12 +171,13 @@ def delete_agent(
 def activate_agent(
     agent_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Activate an agent so it can start handling calls and SMS.
     """
-    return agent_service.activate_agent(db, agent_id, current_business.id)
+    current.require(rbac.P_MANAGE_BRANCHES, agent_id=agent_id)
+    return agent_service.activate_agent(db, agent_id, current.business_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -186,12 +193,13 @@ def activate_agent(
 def deactivate_agent(
     agent_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Deactivate an agent so it stops handling calls and SMS.
     """
-    return agent_service.deactivate_agent(db, agent_id, current_business.id)
+    current.require(rbac.P_MANAGE_BRANCHES, agent_id=agent_id)
+    return agent_service.deactivate_agent(db, agent_id, current.business_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -268,10 +276,11 @@ def connect_custom_domain(
     agent_id: int,
     body: CustomDomainRequest,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
+    current.require(rbac.P_MANAGE_BRANCHES, agent_id=agent_id)
     domain = body.domain.lower().strip().rstrip("/")
-    agent  = _get_owned_agent(db, agent_id, current_business.id)
+    agent  = _get_owned_agent(db, agent_id, current.business_id)
 
     # Reject if already taken by another agent
     conflict = db.query(AIAgent).filter(
@@ -306,10 +315,11 @@ def connect_custom_domain(
 def verify_custom_domain(
     agent_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
     force: bool = Query(False, description="Skip DNS check — dev/testing only"),
 ):
-    agent = _get_owned_agent(db, agent_id, current_business.id)
+    current.require(rbac.P_MANAGE_BRANCHES, agent_id=agent_id)
+    agent = _get_owned_agent(db, agent_id, current.business_id)
 
     if not agent.custom_domain:
         raise NotFoundException(detail="No custom domain connected.", code="NO_CUSTOM_DOMAIN")
@@ -335,9 +345,10 @@ def verify_custom_domain(
 def remove_custom_domain(
     agent_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
-    agent  = _get_owned_agent(db, agent_id, current_business.id)
+    current.require(rbac.P_MANAGE_BRANCHES, agent_id=agent_id)
+    agent  = _get_owned_agent(db, agent_id, current.business_id)
     domain = agent.custom_domain
 
     agent.custom_domain   = None

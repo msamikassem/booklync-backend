@@ -1,10 +1,10 @@
 """
 app/api/v1/endpoints/staff_auth.py
 
-Staff authentication and staff-scoped appointment routes.
-
-Public endpoints: /login, /refresh, /accept-invite
-Protected endpoints (staff JWT): /logout, /me, /appointments, /appointments/{id}/status
+The "own scope" dashboard surface for employee-linked users (the staff
+dashboard). Authentication and invites now live under /auth and /users — these
+routes are all authenticated with the unified user token and return only the
+caller's own data.
 """
 
 from datetime import datetime
@@ -13,65 +13,26 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.core.dependencies import get_current_staff_account, get_db
-from app.models.models import AppointmentStatusEnum, StaffAccount
+from app.core.dependencies import CurrentUser, get_current_user
+from app.db.session import get_db
+from app.models.models import AppointmentStatusEnum
 from app.schemas.appointment import AppointmentListResponse, AppointmentDetailResponse
-from app.schemas.auth import MessageResponse
 from app.schemas.availability import AgentTimeResponse
 from app.schemas.business_hours import AgentDaysOffResponse, BusinessHoursResponse
 from app.schemas.employee import BlockedTimesResponse, WorkingHoursResponse
-from app.schemas.staff_auth import (
-    AcceptInviteRequest,
-    StaffAccessTokenResponse,
-    StaffAppointmentStatusUpdate,
-    StaffLoginRequest,
-    StaffMeResponse,
-    StaffRefreshRequest,
-    StaffTokenResponse,
-)
+from app.schemas.staff_auth import StaffAppointmentStatusUpdate, StaffMeResponse
 from app.services import staff_auth_service
 
 router = APIRouter()
 
 
-# ── Public ────────────────────────────────────────────────────────────────────
-
-@router.post("/accept-invite", response_model=StaffTokenResponse, status_code=201)
-def accept_invite(data: AcceptInviteRequest, db: Session = Depends(get_db)):
-    """Accept a dashboard invite and create a staff account. Returns tokens (logs you in)."""
-    return staff_auth_service.accept_invite(db, data.token, data.password)
-
-
-@router.post("/login", response_model=StaffTokenResponse)
-def staff_login(data: StaffLoginRequest, db: Session = Depends(get_db)):
-    """Log in with staff email and password."""
-    return staff_auth_service.staff_login(db, data.email, data.password)
-
-
-@router.post("/refresh", response_model=StaffAccessTokenResponse)
-def staff_refresh(data: StaffRefreshRequest, db: Session = Depends(get_db)):
-    """Exchange a valid staff refresh token for a new access token."""
-    return staff_auth_service.refresh_staff_token(db, data.refresh_token)
-
-
-# ── Authenticated (staff JWT required) ───────────────────────────────────────
-
-@router.post("/logout", response_model=MessageResponse)
-def staff_logout(
-    db: Session = Depends(get_db),
-    staff: StaffAccount = Depends(get_current_staff_account),
-):
-    """Revoke the staff refresh token."""
-    return staff_auth_service.staff_logout(db, staff.id)
-
-
 @router.get("/me", response_model=StaffMeResponse)
 def staff_me(
     db: Session = Depends(get_db),
-    staff: StaffAccount = Depends(get_current_staff_account),
+    current: CurrentUser = Depends(get_current_user),
 ):
-    """Return profile of the currently authenticated staff member."""
-    return staff_auth_service.get_staff_me(db, staff.id)
+    """Return profile of the currently authenticated employee-linked user."""
+    return staff_auth_service.get_staff_me(db, current)
 
 
 # ── Calendar context (read-only, own branch + own schedule) ──────────────────
@@ -79,46 +40,46 @@ def staff_me(
 @router.get("/time", response_model=AgentTimeResponse)
 def staff_agent_time(
     db: Session = Depends(get_db),
-    staff: StaffAccount = Depends(get_current_staff_account),
+    current: CurrentUser = Depends(get_current_user),
 ):
-    """Current wall-clock time for the staff member's branch (anchors the calendar 'now')."""
-    return staff_auth_service.get_staff_agent_time(db, staff)
+    """Current wall-clock time for the user's branch (anchors the calendar 'now')."""
+    return staff_auth_service.get_staff_agent_time(db, current)
 
 
 @router.get("/business-hours", response_model=BusinessHoursResponse)
 def staff_business_hours(
     db: Session = Depends(get_db),
-    staff: StaffAccount = Depends(get_current_staff_account),
+    current: CurrentUser = Depends(get_current_user),
 ):
-    """Weekly opening schedule for the staff member's branch."""
-    return staff_auth_service.get_staff_business_hours(db, staff)
+    """Weekly opening schedule for the user's branch."""
+    return staff_auth_service.get_staff_business_hours(db, current)
 
 
 @router.get("/working-hours", response_model=WorkingHoursResponse)
 def staff_working_hours(
     db: Session = Depends(get_db),
-    staff: StaffAccount = Depends(get_current_staff_account),
+    current: CurrentUser = Depends(get_current_user),
 ):
-    """The staff member's own weekly working hours."""
-    return staff_auth_service.get_staff_working_hours(db, staff)
+    """The user's own weekly working hours."""
+    return staff_auth_service.get_staff_working_hours(db, current)
 
 
 @router.get("/blocked-times", response_model=BlockedTimesResponse)
 def staff_blocked_times(
     db: Session = Depends(get_db),
-    staff: StaffAccount = Depends(get_current_staff_account),
+    current: CurrentUser = Depends(get_current_user),
 ):
-    """The staff member's own recurring breaks."""
-    return staff_auth_service.get_staff_blocked_times(db, staff)
+    """The user's own recurring breaks."""
+    return staff_auth_service.get_staff_blocked_times(db, current)
 
 
 @router.get("/days-off", response_model=AgentDaysOffResponse)
 def staff_days_off(
     db: Session = Depends(get_db),
-    staff: StaffAccount = Depends(get_current_staff_account),
+    current: CurrentUser = Depends(get_current_user),
 ):
-    """Branch-wide closures plus the staff member's own personal days off."""
-    return staff_auth_service.get_staff_days_off(db, staff)
+    """Branch-wide closures plus the user's own personal days off."""
+    return staff_auth_service.get_staff_days_off(db, current)
 
 
 @router.get("/appointments", response_model=AppointmentListResponse)
@@ -127,12 +88,12 @@ def staff_appointments(
     date_to: Optional[datetime] = Query(None),
     status: Optional[AppointmentStatusEnum] = Query(None),
     db: Session = Depends(get_db),
-    staff: StaffAccount = Depends(get_current_staff_account),
+    current: CurrentUser = Depends(get_current_user),
 ):
-    """Return appointments assigned to the authenticated staff member only."""
+    """Return appointments assigned to the authenticated user only."""
     return staff_auth_service.get_staff_appointments(
         db,
-        staff=staff,
+        current=current,
         date_from=date_from,
         date_to=date_to,
         status=status.value if status else None,
@@ -144,7 +105,7 @@ def staff_update_appointment_status(
     appointment_id: int,
     data: StaffAppointmentStatusUpdate,
     db: Session = Depends(get_db),
-    staff: StaffAccount = Depends(get_current_staff_account),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Update the status of one of your own appointments.
@@ -153,7 +114,7 @@ def staff_update_appointment_status(
     data.validate_allowed()
     return staff_auth_service.update_staff_appointment_status(
         db,
+        current=current,
         appointment_id=appointment_id,
         status=AppointmentStatusEnum(data.status),
-        staff=staff,
     )

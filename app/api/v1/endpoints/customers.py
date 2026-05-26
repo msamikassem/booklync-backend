@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from app.db.session import get_db
-from app.core.dependencies import get_current_business
-from app.models.models import Business
+from app.core import rbac
+from app.core.dependencies import CurrentUser, get_current_user
 from app.schemas.customer import (
     CustomerCreate,
     CustomerUpdate,
@@ -33,10 +33,11 @@ router = APIRouter()
 def create_customer(
     data: CustomerCreate,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Create a new customer for the logged in business."""
-    return customer_service.create_customer(db, data, current_business.id)
+    current.require(rbac.P_MANAGE_CUSTOMERS)
+    return customer_service.create_customer(db, data, current.business_id)
 
 
 @router.get(
@@ -48,13 +49,14 @@ def create_customer(
 def get_customers(
     search: Optional[str] = Query(None, description="Search by name or phone"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Returns all customers for the logged in business.
     Optional search by name or phone number.
     """
-    return customer_service.get_customers(db, current_business.id, search)
+    current.require(rbac.P_VIEW_CUSTOMERS)
+    return customer_service.get_customers(db, current.business_id, search)
 
 
 @router.get(
@@ -66,13 +68,14 @@ def get_customers(
 def get_customer_by_phone(
     phone: str = Query(..., description="Phone number to search for"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Find a customer by their phone number.
     Used by the AI agent to look up callers.
     """
-    return customer_service.get_customer_by_phone(db, phone, current_business.id)
+    current.require(rbac.P_VIEW_CUSTOMERS)
+    return customer_service.get_customer_by_phone(db, phone, current.business_id)
 
 
 @router.get(
@@ -84,10 +87,11 @@ def get_customer_by_phone(
 def get_customer(
     customer_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Returns one customer by id."""
-    return customer_service.get_customer(db, customer_id, current_business.id)
+    current.require(rbac.P_VIEW_CUSTOMERS)
+    return customer_service.get_customer(db, customer_id, current.business_id)
 
 
 @router.put(
@@ -100,10 +104,11 @@ def update_customer(
     customer_id: int,
     data: CustomerUpdate,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Update an existing customer. All fields optional."""
-    return customer_service.update_customer(db, customer_id, data, current_business.id)
+    current.require(rbac.P_MANAGE_CUSTOMERS)
+    return customer_service.update_customer(db, customer_id, data, current.business_id)
 
 
 @router.delete(
@@ -115,10 +120,11 @@ def update_customer(
 def delete_customer(
     customer_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Delete a customer and all their appointments."""
-    return customer_service.delete_customer(db, customer_id, current_business.id)
+    current.require(rbac.P_MANAGE_CUSTOMERS)
+    return customer_service.delete_customer(db, customer_id, current.business_id)
 
 
 @router.get(
@@ -129,13 +135,14 @@ def delete_customer(
 def get_customer_appointments(
     customer_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Returns full appointment history for a customer.
     Used by the AI agent to provide context during calls.
     """
+    current.require(rbac.P_VIEW_CUSTOMERS)
     from app.services import appointment_service
     return appointment_service.get_customer_appointments(
-        db, customer_id, current_business.id
+        db, customer_id, current.business_id
     )

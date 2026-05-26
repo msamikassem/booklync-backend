@@ -16,15 +16,14 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.core.dependencies import get_current_business
-from app.models.models import Business
+from app.core.dependencies import get_current_user, CurrentUser
 from app.schemas.auth import (
     BusinessRegister,
     BusinessLogin,
     RefreshTokenRequest,
     TokenResponse,
     AccessTokenResponse,
-    BusinessResponse,
+    UserMeResponse,
     MessageResponse,
 )
 from app.services import auth_service
@@ -117,37 +116,34 @@ def refresh(
 )
 def logout(
     db: Session = Depends(get_db),
-    # get_current_business validates the JWT and returns the logged in business
-    # if the token is missing or invalid, this endpoint never runs
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
-    Log out the currently authenticated business.
+    Log out the currently authenticated user.
 
     Revokes the refresh token in the database.
     The access token will expire naturally after 30 minutes.
     """
-    return auth_service.logout(db, current_business.id)
+    return auth_service.logout(db, current.id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GET CURRENT BUSINESS (me)
+# GET CURRENT USER (me)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get(
     "/me",
-    response_model=BusinessResponse,
+    response_model=UserMeResponse,
     status_code=200,
-    summary="Get the currently logged in business",
+    summary="Get the currently logged in user (identity + access)",
 )
 def me(
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
-    Returns the profile of the currently authenticated business.
-
-    Useful for the dashboard to load the business name, plan, etc.
-    The client calls this once after login to get the business details.
+    Returns the authenticated user's identity plus their role and per-branch
+    permissions. The dashboard reads this once after login to render role-aware
+    UI (which branches, which tabs, which actions are available).
     """
-    return auth_service.get_current_business(db, current_business.id)
+    return auth_service.get_me(db, current.id)

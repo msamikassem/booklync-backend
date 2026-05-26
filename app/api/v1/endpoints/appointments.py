@@ -11,8 +11,8 @@ from datetime import datetime
 from typing import Optional
 
 from app.db.session import get_db
-from app.core.dependencies import get_current_business
-from app.models.models import Business
+from app.core import rbac
+from app.core.dependencies import CurrentUser, get_current_user
 from app.schemas.appointment import (
     AppointmentCreate,
     AppointmentUpdate,
@@ -35,7 +35,7 @@ router = APIRouter()
 def create_appointment(
     data: AppointmentCreate,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Create a new appointment.
@@ -44,7 +44,8 @@ def create_appointment(
     Checks for overlapping appointments before creating.
     Cannot create appointments in the past.
     """
-    return appointment_service.create_appointment(db, data, current_business.id)
+    current.require(rbac.P_MANAGE_APPOINTMENTS, agent_id=data.agent_id)
+    return appointment_service.create_appointment(db, data, current.business_id)
 
 
 @router.get(
@@ -61,16 +62,17 @@ def get_appointments(
     customer_id: Optional[int] = Query(None, description="Filter by customer"),
     status: Optional[str] = Query(None, description="Filter by status"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Returns appointments for an agent with optional filters.
     Use date_from and date_to to get appointments for a specific range.
     """
+    current.require(rbac.P_VIEW_BRANCH_CALENDAR, agent_id=agent_id)
     return appointment_service.get_appointments(
         db=db,
         agent_id=agent_id,
-        business_id=current_business.id,
+        business_id=current.business_id,
         date_from=date_from,
         date_to=date_to,
         employee_id=employee_id,
@@ -88,10 +90,12 @@ def get_appointments(
 def get_appointment(
     appointment_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Returns one appointment by id with full details."""
-    return appointment_service.get_appointment(db, appointment_id, current_business.id)
+    agent_id = appointment_service.resolve_appointment_agent_id(db, appointment_id, current.business_id)
+    current.require(rbac.P_VIEW_BRANCH_CALENDAR, agent_id=agent_id)
+    return appointment_service.get_appointment(db, appointment_id, current.business_id)
 
 
 @router.put(
@@ -104,14 +108,16 @@ def update_appointment(
     appointment_id: int,
     data: AppointmentUpdate,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Update an appointment — reschedule or change employee.
     Cannot update cancelled, completed, or no_show appointments.
     """
+    agent_id = appointment_service.resolve_appointment_agent_id(db, appointment_id, current.business_id)
+    current.require(rbac.P_RESCHEDULE_APPOINTMENTS, agent_id=agent_id)
     return appointment_service.update_appointment(
-        db, appointment_id, data, current_business.id
+        db, appointment_id, data, current.business_id
     )
 
 
@@ -125,14 +131,16 @@ def update_appointment_status(
     appointment_id: int,
     data: AppointmentStatusUpdate,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Update the status of an appointment.
     Valid statuses: pending, confirmed, cancelled, completed, no_show
     """
+    agent_id = appointment_service.resolve_appointment_agent_id(db, appointment_id, current.business_id)
+    current.require(rbac.P_UPDATE_APPT_STATUS, agent_id=agent_id)
     return appointment_service.update_appointment_status(
-        db, appointment_id, data.status, current_business.id
+        db, appointment_id, data.status, current.business_id
     )
 
 
@@ -145,12 +153,14 @@ def update_appointment_status(
 def cancel_appointment(
     appointment_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Cancel an appointment.
     Shortcut for PATCH /status with status=cancelled.
     """
+    agent_id = appointment_service.resolve_appointment_agent_id(db, appointment_id, current.business_id)
+    current.require(rbac.P_MANAGE_APPOINTMENTS, agent_id=agent_id)
     return appointment_service.cancel_appointment(
-        db, appointment_id, current_business.id
+        db, appointment_id, current.business_id
     )

@@ -124,3 +124,34 @@ class MessageResponse(BaseModel):
     Used by: POST /api/v1/auth/logout
     """
     message: str
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RBAC identity — what GET /auth/me returns
+# ─────────────────────────────────────────────────────────────────────────────
+
+class BranchAccess(BaseModel):
+    """One branch the user can access, with the role + permissions they hold there."""
+    agent_id: int
+    agent_name: str
+    role_key: str
+    role_name: str
+    permissions: list[str]
+
+
+class UserMeResponse(BaseModel):
+    """
+    Identity + access profile of the authenticated user.
+    The dashboard reads this once after login to render role-aware UI.
+    """
+    id: int
+    email: str
+    is_owner: bool
+    employee_id: Optional[int] = None
+    employee_name: Optional[str] = None
+    business_id: int
+    business_name: str
+    subscription_plan: str
+    # Aggregated permission keys across all branches (owner → every key).
+    permissions: list[str]
+    branches: list[BranchAccess]

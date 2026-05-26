@@ -15,8 +15,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from app.db.session import get_db
-from app.core.dependencies import get_current_business
-from app.models.models import Business
+from app.core.dependencies import CurrentUser, get_current_user
 from app.schemas.availability import (
     AvailabilityResponse,
     SlotCheckResponse,
@@ -44,7 +43,7 @@ def get_availability(
     employee_id: Optional[int] = Query(None, description="Optional — filter to specific employee"),
     variation_id: Optional[int] = Query(None, description="Optional — use this variation's duration for slot generation"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Returns all available booking slots for a given date and service.
@@ -52,13 +51,14 @@ def get_availability(
     For variation-based services, pass variation_id to use that variation's duration.
     Without variation_id the shortest active variation duration is used.
     """
+    current.require_branch(agent_id)
     return availability_service.get_availability(
         db=db,
         agent_id=agent_id,
         service_id=service_id,
         requested_date=date,
         employee_id=employee_id,
-        business_id=current_business.id,
+        business_id=current.business_id,
         variation_id=variation_id,
     )
 
@@ -80,19 +80,20 @@ def check_slot(
     employee_id: Optional[int] = Query(None, description="Optional — specific employee"),
     variation_id: Optional[int] = Query(None, description="Optional — use this variation's duration"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Check if a specific date and time is available for booking.
     For variation-based services, pass variation_id to use the correct duration.
     """
+    current.require_branch(agent_id)
     return availability_service.check_slot(
         db=db,
         agent_id=agent_id,
         service_id=service_id,
         requested_start=start_time,
         employee_id=employee_id,
-        business_id=current_business.id,
+        business_id=current.business_id,
         variation_id=variation_id,
     )
 
@@ -142,7 +143,7 @@ def get_public_availability(
 def get_agent_time(
     agent_id: int = Query(..., description="Which agent to get time for"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Returns the current local time for an agent based on their timezone.
@@ -155,8 +156,9 @@ def get_agent_time(
     Useful for the AI agent to know the current local time before
     making or checking bookings.
     """
+    current.require_branch(agent_id)
     return availability_service.get_agent_time(
         db=db,
         agent_id=agent_id,
-        business_id=current_business.id,
+        business_id=current.business_id,
     )

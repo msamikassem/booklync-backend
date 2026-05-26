@@ -10,8 +10,9 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from app.db.session import get_db
-from app.core.dependencies import get_current_business
-from app.models.models import Business
+from app.core import rbac
+from app.core.dependencies import CurrentUser, get_current_user
+from app.services import appointment_service
 from app.services.notification_service import (
     send_appointment_notification,
     send_confirmation,
@@ -44,9 +45,11 @@ class ManualReminderRequest(BaseModel):
 def trigger_confirmation(
     appointment_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Manually resend a booking confirmation."""
+    agent_id = appointment_service.resolve_appointment_agent_id(db, appointment_id, current.business_id)
+    current.require(rbac.P_MESSAGE_CUSTOMERS, agent_id=agent_id)
     sent = send_appointment_notification(
         db=db,
         appointment_id=appointment_id,
@@ -61,9 +64,11 @@ def trigger_confirmation(
 def trigger_cancellation(
     appointment_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Manually send a cancellation notice."""
+    agent_id = appointment_service.resolve_appointment_agent_id(db, appointment_id, current.business_id)
+    current.require(rbac.P_MESSAGE_CUSTOMERS, agent_id=agent_id)
     sent = send_cancellation(db, appointment_id)
     return {"sent": sent, "appointment_id": appointment_id, "type": "cancellation"}
 
@@ -73,12 +78,14 @@ def trigger_reminder(
     appointment_id: int,
     data: ManualReminderRequest,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Manually trigger a reminder for an appointment.
     Use template_key to pick which template, or provide custom_message.
     """
+    agent_id = appointment_service.resolve_appointment_agent_id(db, appointment_id, current.business_id)
+    current.require(rbac.P_MESSAGE_CUSTOMERS, agent_id=agent_id)
     sent = send_appointment_notification(
         db=db,
         appointment_id=appointment_id,
@@ -94,18 +101,21 @@ def trigger_reminder(
 def trigger_custom(
     data: CustomNotificationRequest,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Send a completely custom SMS message for any appointment."""
+    agent_id = appointment_service.resolve_appointment_agent_id(db, data.appointment_id, current.business_id)
+    current.require(rbac.P_MESSAGE_CUSTOMERS, agent_id=agent_id)
     sent = send_custom(db, data.appointment_id, data.message)
     return {"sent": sent, "appointment_id": data.appointment_id, "type": "custom"}
 
 
 @router.get("/templates")
 def get_templates(
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """List all available notification templates."""
+    current.require(rbac.P_MESSAGE_CUSTOMERS)
     return {
         "templates": [
             {"key": k, "preview": v[:100] + "..."}
@@ -116,20 +126,22 @@ def get_templates(
 
 @router.get("/rules")
 def get_rules(
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """List all active notification rules (reminder windows)."""
+    current.require(rbac.P_MESSAGE_CUSTOMERS)
     return {"rules": DEFAULT_NOTIFICATION_RULES}
 
 
 @router.post("/scheduler/run")
 def run_scheduler_now(
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Manually trigger a reminder check right now.
     Useful for testing — simulates what the scheduler does every minute.
     """
+    current.require(rbac.P_MANAGE_AUTOMATIONS)
     result = run_reminder_check(db)
     return result

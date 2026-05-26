@@ -108,6 +108,8 @@ class Business(Base):
     business_type = relationship("BusinessType", back_populates="businesses")
     agents        = relationship("AIAgent",   back_populates="business",  cascade="all, delete")
     customers     = relationship("Customer",  back_populates="business",  cascade="all, delete")
+    users         = relationship("User",      back_populates="business",  cascade="all, delete")
+    roles         = relationship("Role",      back_populates="business",  cascade="all, delete")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -146,6 +148,7 @@ class AIAgent(Base):
     appointments      = relationship("Appointment",          back_populates="agent",    cascade="all, delete")
     subscriptions     = relationship("AIAgentSubscription",  back_populates="agent",    cascade="all, delete")
     features          = relationship("AgentFeature",         back_populates="agent",    cascade="all, delete")
+    user_branch_roles = relationship("UserBranchRole",       back_populates="agent",    cascade="all, delete")
     # agent-level days off (public holidays, full-branch closures).
     days_off          = relationship("DayOff",               back_populates="agent",    cascade="all, delete",
                                      primaryjoin="and_(DayOff.agent_id==AIAgent.id, DayOff.employee_id==None)",
@@ -180,8 +183,9 @@ class Employee(Base):
     blocked_times = relationship("BlockedTime",         back_populates="employee", cascade="all, delete")
     capabilities  = relationship("EmployeeCapability",  back_populates="employee", cascade="all, delete")
     appointments  = relationship("Appointment",         back_populates="employee", cascade="all, delete")
-    staff_account = relationship("StaffAccount",        back_populates="employee", uselist=False, cascade="all, delete")
-    invites       = relationship("EmployeeInvite",      back_populates="employee", cascade="all, delete")
+    # Optional dashboard login linked to this employee (one-to-one; created via invite).
+    user          = relationship("User",                back_populates="employee", uselist=False)
+    invites       = relationship("UserInvite",          back_populates="employee", cascade="all, delete")
     # personal days off for this employee.
     days_off      = relationship(
         "DayOff",
@@ -620,46 +624,176 @@ class DayOff(Base):
     )
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# RBAC — Role-Based Access Control
+#
+# Identity & access for everyone who logs into the dashboard (owner, branch
+# manager, receptionist, staff). The design separates three concerns so that
+# granular custom permissions can be added later without a refactor:
+#
+#   Permission  — an atomic capability (e.g. "manage_services")
+#   Role        — a named bundle of permissions (4 system presets seeded)
+#   User        — a login identity belonging to one tenant (Business)
+#   UserBranchRole — assigns a User a Role AT a specific branch (AIAgent)
+#
+# "Can user X do Y at branch Z?" resolves as:
+#   owner short-circuit (User.is_owner) → yes on every branch in the tenant
+#   else: UserBranchRole(user=X, agent=Z) → Role → role_permissions → Y?
+# ═════════════════════════════════════════════════════════════════════════════
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# StaffAccount
-# Auth identity for an employee who has been given dashboard access.
-# One-to-one with Employee; created when an invite is accepted.
+# Permission
+# Atomic capability key. Seeded from app/core/rbac.py at startup. Adding a new
+# granular permission later = add a row here + map it to roles; no schema change.
 # ─────────────────────────────────────────────────────────────────────────────
-class StaffAccount(Base):
-    __tablename__ = "staff_accounts"
+class Permission(Base):
+    __tablename__ = "permissions"
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    key         = Column(Text, nullable=False, unique=True, index=True)   # e.g. "manage_services"
+    description = Column(Text, nullable=False)
+    category    = Column(Text, nullable=True)                              # UI grouping (e.g. "scheduling")
+
+    role_links  = relationship("RolePermission", back_populates="permission", cascade="all, delete")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Role
+# A named bundle of permissions. System presets (owner / branch_manager /
+# receptionist / staff) have business_id NULL and is_system=True; future custom
+# roles carry a real business_id.
+# ─────────────────────────────────────────────────────────────────────────────
+class Role(Base):
+    __tablename__ = "roles"
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    # NULL = shared system preset; set = a tenant's own custom role.
+    business_id = Column(Integer, ForeignKey("businesses.id"), nullable=True)
+    key         = Column(Text, nullable=False)                # e.g. "branch_manager"
+    name        = Column(Text, nullable=False)                # display name
+    description = Column(Text, nullable=True)
+    is_system   = Column(Boolean, nullable=False, default=False, server_default="false")
+    created_at  = Column(DateTime(timezone=True), server_default=func.now())
+
+    business     = relationship("Business", back_populates="roles")
+    permissions  = relationship("RolePermission", back_populates="role", cascade="all, delete")
+    branch_roles = relationship("UserBranchRole", back_populates="role")
+
+    __table_args__ = (
+        # A role key is unique per tenant; system presets (business_id NULL) are
+        # globally unique by key via a partial index below.
+        UniqueConstraint("business_id", "key", name="uq_role_business_key"),
+        Index("uix_role_system_key", "key", unique=True, postgresql_where=text("business_id IS NULL")),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RolePermission
+# Many-to-many: which permissions a role grants.
+# ─────────────────────────────────────────────────────────────────────────────
+class RolePermission(Base):
+    __tablename__ = "role_permissions"
 
     id            = Column(Integer, primary_key=True, autoincrement=True)
-    employee_id   = Column(Integer, ForeignKey("employees.id"), nullable=False, unique=True)
+    role_id       = Column(Integer, ForeignKey("roles.id"),       nullable=False)
+    permission_id = Column(Integer, ForeignKey("permissions.id"), nullable=False)
+
+    role       = relationship("Role",       back_populates="permissions")
+    permission = relationship("Permission", back_populates="role_links")
+
+    __table_args__ = (
+        UniqueConstraint("role_id", "permission_id", name="uq_role_permission"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# User
+# Single login identity for all dashboard users. Belongs to exactly one tenant
+# (Business). May optionally link to one Employee (for the own-calendar view).
+# Owners carry is_owner=True → full access to every branch in the tenant.
+# ─────────────────────────────────────────────────────────────────────────────
+class User(Base):
+    __tablename__ = "users"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    business_id   = Column(Integer, ForeignKey("businesses.id"), nullable=False, index=True)
+    # Optional 1:1 link to an Employee record (nullable for owners/managers).
+    # ON DELETE SET NULL: deleting the employee unlinks the login rather than
+    # cascading into (and destroying) the user account.
+    employee_id   = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, unique=True)
     email         = Column(Text, nullable=False, unique=True, index=True)
     password_hash = Column(Text, nullable=False)
+    # Tenant-wide authority flag — explicit rather than a NULL-branch wildcard.
+    is_owner      = Column(Boolean, nullable=False, default=False, server_default="false")
     refresh_token = Column(Text, nullable=True)
     last_login    = Column(DateTime(timezone=True), nullable=True)
-    active        = Column(Boolean, nullable=False, default=True)
+    active        = Column(Boolean, nullable=False, default=True, server_default="true")
     created_at    = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at    = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
-    employee = relationship("Employee", back_populates="staff_account")
+    business     = relationship("Business", back_populates="users")
+    employee     = relationship("Employee", back_populates="user")
+    branch_roles = relationship("UserBranchRole", back_populates="user", cascade="all, delete")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EmployeeInvite
-# A pending dashboard-access invitation for an employee.
-# Token is stored as a bcrypt hash (raw token sent only in the email).
+# UserBranchRole
+# The core scoping assignment: a User holds a Role AT a specific branch.
+# agent_id is ALWAYS set (never a wildcard) — tenant-wide authority is the
+# is_owner flag on User, so an accidental NULL can never escalate privileges.
+# Multiple rows per user = membership in multiple branches.
 # ─────────────────────────────────────────────────────────────────────────────
-class EmployeeInvite(Base):
-    __tablename__ = "employee_invites"
+class UserBranchRole(Base):
+    __tablename__ = "user_branch_roles"
 
-    id           = Column(Integer, primary_key=True, autoincrement=True)
-    employee_id  = Column(Integer, ForeignKey("employees.id"), nullable=False)
-    email        = Column(Text, nullable=False)
-    token_hash   = Column(Text, nullable=False, unique=True, index=True)
-    status       = Column(
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    user_id    = Column(Integer, ForeignKey("users.id"),     nullable=False, index=True)
+    agent_id   = Column(Integer, ForeignKey("ai_agents.id"), nullable=False, index=True)
+    role_id    = Column(Integer, ForeignKey("roles.id"),     nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user  = relationship("User",          back_populates="branch_roles")
+    agent = relationship("AIAgent",       back_populates="user_branch_roles")
+    role  = relationship("Role",          back_populates="branch_roles")
+
+    __table_args__ = (
+        # One role per user per branch.
+        UniqueConstraint("user_id", "agent_id", name="uq_user_branch"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UserInvite
+# A pending dashboard-access invitation. Originates from an existing Employee
+# (email + role + branch). Token stored as a bcrypt hash (raw token only emailed).
+# On accept → creates a User + a UserBranchRole.
+# ─────────────────────────────────────────────────────────────────────────────
+class UserInvite(Base):
+    __tablename__ = "user_invites"
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    # The branch this invite grants access to, and the role at that branch.
+    agent_id    = Column(Integer, ForeignKey("ai_agents.id"), nullable=False)
+    role_id     = Column(Integer, ForeignKey("roles.id"),     nullable=False)
+    # The employee being granted login access (must exist first).
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False)
+    email       = Column(Text, nullable=False)
+    token_hash  = Column(Text, nullable=False, unique=True, index=True)
+    status      = Column(
         PgEnum(InviteStatusEnum, name="invite_status_enum", create_type=True),
         nullable=False,
         default=InviteStatusEnum.pending,
     )
-    expires_at   = Column(DateTime(timezone=True), nullable=False)
-    created_at   = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at  = Column(DateTime(timezone=True), nullable=False)
+    created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
+    agent    = relationship("AIAgent")
+    role     = relationship("Role")
     employee = relationship("Employee", back_populates="invites")
 
 

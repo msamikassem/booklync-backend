@@ -37,6 +37,7 @@ from app.api.v1.endpoints import voice
 from app.api.v1.endpoints import notifications
 from app.api.v1.endpoints import public
 from app.api.v1.endpoints import staff_auth
+from app.api.v1.endpoints import users
 
 
 # ── Scheduler instance ────────────────────────────────────────────────────────
@@ -72,6 +73,16 @@ def _run_reminder_job():
 async def lifespan(app: FastAPI):
     setup_logging()
     logger.info(f"Starting {settings.APP_NAME} — env={settings.APP_ENV}")
+
+    # ── Sync RBAC catalogue (permissions + system role presets) ───────────
+    from app.services.rbac_service import sync_rbac_catalogue
+    db = SessionLocal()
+    try:
+        sync_rbac_catalogue(db)
+    except Exception as e:
+        logger.exception(f"RBAC catalogue sync failed: {e}")
+    finally:
+        db.close()
 
     # ── Start scheduler ───────────────────────────────────────────────────
     scheduler.add_job(
@@ -134,6 +145,7 @@ def create_app() -> FastAPI:
     app.include_router(notifications.router,    prefix="/api/v1/notifications", tags=["Notifications"])
     app.include_router(public.router,           prefix="/api/v1/public",        tags=["Public"])
     app.include_router(staff_auth.router,       prefix="/api/v1/staff",         tags=["Staff"])
+    app.include_router(users.router,            prefix="/api/v1/users",         tags=["Users & Roles"])
 
     @app.get("/health", tags=["Health"])
     def health_check():

@@ -11,8 +11,8 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.core.dependencies import get_current_business
-from app.models.models import Business
+from app.core import rbac
+from app.core.dependencies import CurrentUser, get_current_user
 from app.schemas.business_hours import (
     BusinessHoursSet,
     AgentDayOffCreate,
@@ -39,7 +39,7 @@ router = APIRouter()
 def set_business_hours(
     data: BusinessHoursSet,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Set the weekly opening schedule for an agent.
@@ -47,7 +47,8 @@ def set_business_hours(
     Days not included are treated as closed.
     agent_id is included in the request body.
     """
-    return business_hours_service.set_business_hours(db, data, current_business.id)
+    current.require(rbac.P_MANAGE_SCHEDULES, agent_id=data.agent_id)
+    return business_hours_service.set_business_hours(db, data, current.business_id)
 
 
 @router.get(
@@ -59,14 +60,15 @@ def set_business_hours(
 def get_business_hours(
     agent_id: int = Query(..., description="The agent to get business hours for"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Returns the weekly opening schedule for an agent.
     Results ordered Monday to Sunday.
     Days with no entry are closed.
     """
-    return business_hours_service.get_business_hours(db, agent_id, current_business.id)
+    current.require_branch(agent_id)
+    return business_hours_service.get_business_hours(db, agent_id, current.business_id)
 
 
 @router.delete(
@@ -79,14 +81,15 @@ def delete_business_hour(
     business_hour_id: int,
     agent_id: int = Query(..., description="The agent this business hour belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Remove a specific day's opening hours.
     That day will be treated as closed after deletion.
     """
+    current.require(rbac.P_MANAGE_SCHEDULES, agent_id=agent_id)
     return business_hours_service.delete_business_hour(
-        db, business_hour_id, agent_id, current_business.id
+        db, business_hour_id, agent_id, current.business_id
     )
 
 
@@ -103,7 +106,7 @@ def delete_business_hour(
 def add_agent_day_off(
     data: AgentDayOffCreate,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Add a branch-wide closure period.
@@ -111,7 +114,8 @@ def add_agent_day_off(
     Use this for public holidays, renovations, special closures.
     agent_id is included in the request body.
     """
-    return business_hours_service.add_agent_day_off(db, data, current_business.id)
+    current.require(rbac.P_MANAGE_SCHEDULES, agent_id=data.agent_id)
+    return business_hours_service.add_agent_day_off(db, data, current.business_id)
 
 
 @router.get(
@@ -123,13 +127,14 @@ def add_agent_day_off(
 def get_agent_days_off(
     agent_id: int = Query(..., description="The agent to get days off for"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Returns all branch-wide closure periods for an agent.
     Personal employee days off are not included here.
     """
-    return business_hours_service.get_agent_days_off(db, agent_id, current_business.id)
+    current.require_branch(agent_id)
+    return business_hours_service.get_agent_days_off(db, agent_id, current.business_id)
 
 
 @router.delete(
@@ -142,9 +147,10 @@ def delete_agent_day_off(
     day_off_id: int,
     agent_id: int = Query(..., description="The agent this day off belongs to"),
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """Remove a specific branch-wide closure period."""
+    current.require(rbac.P_MANAGE_SCHEDULES, agent_id=agent_id)
     return business_hours_service.delete_agent_day_off(
-        db, day_off_id, agent_id, current_business.id
+        db, day_off_id, agent_id, current.business_id
     )

@@ -21,9 +21,10 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 
 from app.db.session import get_db
-from app.core.dependencies import get_current_business
+from app.core import rbac
+from app.core.dependencies import CurrentUser, get_current_user
 from app.core.exceptions import NotFoundException, ForbiddenException
-from app.models.models import Business, AIAgent, ConversationLog
+from app.models.models import AIAgent, ConversationLog
 from app.schemas.chat import ChatMessage, ChatMessageResponse, ConversationHistoryResponse
 from app.services.ai_agent_service import handle_incoming_sms
 from app.services import customer_service
@@ -44,7 +45,7 @@ router = APIRouter()
 def chat(
     data: ChatMessage,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Send a message to an AI agent and get a reply.
@@ -72,9 +73,10 @@ def chat(
     if not agent:
         raise NotFoundException(detail="Agent not found")
 
-    if agent.business_id != current_business.id:
+    if agent.business_id != current.business_id:
         raise ForbiddenException(detail="You do not have access to this agent")
 
+    current.require(rbac.P_MESSAGE_CUSTOMERS, agent_id=agent.id)
     return _process_chat_message(db, data, agent)
 
 
@@ -127,7 +129,7 @@ def public_chat(
 def get_conversation(
     conversation_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Get the full message history for a conversation.
@@ -145,8 +147,10 @@ def get_conversation(
 
     # verify conversation belongs to this business via agent
     agent = db.query(AIAgent).filter(AIAgent.id == log.agent_id).first()
-    if not agent or agent.business_id != current_business.id:
+    if not agent or agent.business_id != current.business_id:
         raise ForbiddenException(detail="You do not have access to this conversation")
+
+    current.require(rbac.P_VIEW_CUSTOMERS, agent_id=agent.id)
 
     from app.models.models import Customer
     customer = db.query(Customer).filter(Customer.id == log.customer_id).first()
@@ -175,7 +179,7 @@ def get_conversation(
 def get_conversations(
     agent_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Get all conversation logs for an agent.
@@ -185,8 +189,10 @@ def get_conversations(
     agent = db.query(AIAgent).filter(AIAgent.id == agent_id).first()
     if not agent:
         raise NotFoundException(detail="Agent not found")
-    if agent.business_id != current_business.id:
+    if agent.business_id != current.business_id:
         raise ForbiddenException(detail="You do not have access to this agent")
+
+    current.require(rbac.P_VIEW_CUSTOMERS, agent_id=agent_id)
 
     from app.models.models import Customer
     logs = db.query(ConversationLog).filter(
@@ -223,7 +229,7 @@ def get_conversations(
 def clear_conversation(
     conversation_id: int,
     db: Session = Depends(get_db),
-    current_business: Business = Depends(get_current_business),
+    current: CurrentUser = Depends(get_current_user),
 ):
     """
     Clear all messages from a conversation.
@@ -239,8 +245,10 @@ def clear_conversation(
         raise NotFoundException(detail="Conversation not found")
 
     agent = db.query(AIAgent).filter(AIAgent.id == log.agent_id).first()
-    if not agent or agent.business_id != current_business.id:
+    if not agent or agent.business_id != current.business_id:
         raise ForbiddenException(detail="You do not have access to this conversation")
+
+    current.require(rbac.P_MESSAGE_CUSTOMERS, agent_id=agent.id)
 
     log.messages = []
     db.commit()
