@@ -74,6 +74,15 @@ def _ensure_tz_aware(dt: datetime, tz) -> datetime:
     return dt
 
 
+def _fmt_local_time(dt_utc: datetime, tz) -> str:
+    """Format a UTC datetime as a human-readable local time, e.g. '3:12 PM'."""
+    local = _ensure_tz_aware(dt_utc, pytz.UTC).astimezone(tz)
+    hour   = local.strftime("%I").lstrip("0") or "12"
+    minute = local.strftime("%M")
+    ampm   = local.strftime("%p")
+    return f"{hour}:{minute} {ampm}"
+
+
 def _check_no_overlap(
     db: Session,
     employee_id: int,
@@ -81,6 +90,7 @@ def _check_no_overlap(
     end_time: datetime,
     service: Optional[Service] = None,
     exclude_appointment_id: Optional[int] = None,
+    tz=None,
 ) -> None:
     """
     Check that an employee has no overlapping appointment, accounting for
@@ -92,16 +102,24 @@ def _check_no_overlap(
     A conflict exists when two effective windows overlap:
         new_eff_start < existing_eff_end  AND  new_eff_end > existing_eff_start
 
-    We must expand both sides — checking only the new appointment's buffers
-    misses the case where an existing appointment's prep time extends into
-    the new slot (e.g. existing ends at 10:30 with prep_after=15, new starts
-    at 10:31 — would slip through a one-sided check).
+    When a conflict is found the exception message distinguishes three cases:
+      1. Preceding prep conflict — the existing appointment ends before the new one
+         starts, but prep-time buffers cause the windows to touch.  Reports the
+         earliest valid start time.
+      2. Following prep conflict — the existing appointment starts after the new one
+         ends, but prep-time buffers cause the windows to touch.  Reports the latest
+         valid start time for this slot.
+      3. Direct double-booking — the raw appointment times themselves overlap.
     """
     prep_before_new = timedelta(minutes=(service.preparation_before_minutes or 0) if service else 0)
     prep_after_new  = timedelta(minutes=(service.preparation_after_minutes  or 0) if service else 0)
 
-    new_eff_start = start_time - prep_before_new
-    new_eff_end   = end_time   + prep_after_new
+    # Normalise to UTC-aware so comparisons against DB TIMESTAMPTZ values are safe.
+    new_start_utc = _ensure_tz_aware(start_time, pytz.UTC)
+    new_end_utc   = _ensure_tz_aware(end_time,   pytz.UTC)
+
+    new_eff_start = new_start_utc - prep_before_new
+    new_eff_end   = new_end_utc   + prep_after_new
 
     # SQL pre-filter: load appointments whose core [start, end] is within 4 hours
     # of our effective window — a generous bound that catches any appointment whose
@@ -125,17 +143,87 @@ def _check_no_overlap(
         appt_prep_before = timedelta(minutes=(appt_svc.preparation_before_minutes or 0) if appt_svc else 0)
         appt_prep_after  = timedelta(minutes=(appt_svc.preparation_after_minutes  or 0) if appt_svc else 0)
 
-        appt_eff_start = _ensure_tz_aware(appt.start_time, pytz.UTC) - appt_prep_before
-        appt_eff_end   = _ensure_tz_aware(appt.end_time,   pytz.UTC) + appt_prep_after
+        appt_start_utc = _ensure_tz_aware(appt.start_time, pytz.UTC)
+        appt_end_utc   = _ensure_tz_aware(appt.end_time,   pytz.UTC)
+        appt_eff_start = appt_start_utc - appt_prep_before
+        appt_eff_end   = appt_end_utc   + appt_prep_after
 
-        if new_eff_start < appt_eff_end and new_eff_end > appt_eff_start:
-            raise SlotUnavailableException(
-                detail=(
-                    f"This employee already has an appointment from "
-                    f"{appt.start_time.strftime('%H:%M')} to "
-                    f"{appt.end_time.strftime('%H:%M')} UTC"
+        if not (new_eff_start < appt_eff_end and new_eff_end > appt_eff_start):
+            continue
+
+        # ── Conflict detected — classify and build a specific message ──────────
+
+        if appt_end_utc <= new_start_utc:
+            # The existing appointment already ENDED before the new one starts, so
+            # the conflict is entirely caused by prep-time buffers (not a true overlap).
+            min_start_utc = appt_eff_end + prep_before_new
+
+            parts = []
+            if appt_prep_after.total_seconds() > 0:
+                m = int(appt_prep_after.total_seconds() // 60)
+                parts.append(
+                    f"the previous appointment requires {m} minute{'s' if m != 1 else ''} "
+                    f"of preparation time after it ends"
                 )
-            )
+            if prep_before_new.total_seconds() > 0:
+                m = int(prep_before_new.total_seconds() // 60)
+                parts.append(
+                    f"this service requires {m} minute{'s' if m != 1 else ''} "
+                    f"of preparation before the appointment begins"
+                )
+
+            detail = (" and ".join(parts)).capitalize() + "."
+            if tz:
+                detail += f" Earliest available slot: {_fmt_local_time(min_start_utc, tz)}."
+            else:
+                detail += f" Earliest available start: {min_start_utc.strftime('%H:%M')} UTC."
+
+            raise SlotUnavailableException(detail=detail, code="PREP_TIME_CONFLICT")
+
+        elif appt_start_utc >= new_end_utc:
+            # The existing appointment only STARTS after the new one ends, so
+            # the conflict is entirely caused by prep-time buffers (not a true overlap).
+            duration = new_end_utc - new_start_utc
+            latest_start_utc = appt_eff_start - duration - prep_after_new
+
+            parts = []
+            if prep_after_new.total_seconds() > 0:
+                m = int(prep_after_new.total_seconds() // 60)
+                parts.append(
+                    f"this service requires {m} minute{'s' if m != 1 else ''} "
+                    f"of preparation after the appointment ends"
+                )
+            if appt_prep_before.total_seconds() > 0:
+                m = int(appt_prep_before.total_seconds() // 60)
+                parts.append(
+                    f"the following appointment requires {m} minute{'s' if m != 1 else ''} "
+                    f"of preparation before it begins"
+                )
+
+            detail = (" and ".join(parts)).capitalize() + "."
+            if tz:
+                detail += (
+                    f" To allow sufficient preparation time, this service must start"
+                    f" no later than {_fmt_local_time(latest_start_utc, tz)}."
+                )
+            else:
+                detail += f" Latest valid start: {latest_start_utc.strftime('%H:%M')} UTC."
+
+            raise SlotUnavailableException(detail=detail, code="PREP_TIME_CONFLICT")
+
+        else:
+            # The appointment times themselves overlap — a direct double-booking.
+            if tz:
+                start_str = _fmt_local_time(appt_start_utc, tz)
+                end_str   = _fmt_local_time(appt_end_utc,   tz)
+                detail = f"This employee already has an appointment from {start_str} to {end_str}."
+            else:
+                detail = (
+                    f"This employee already has an appointment from "
+                    f"{appt_start_utc.strftime('%H:%M')} to "
+                    f"{appt_end_utc.strftime('%H:%M')} UTC."
+                )
+            raise SlotUnavailableException(detail=detail)
 
 
 def _check_no_blocked_time(
@@ -308,6 +396,9 @@ def _build_detail(appointment, agent, customer, employee, service) -> dict:
         "start_time_local": start_local,
         "end_time_local": end_local,
         "timezone": timezone_str,
+        "preparation_before_minutes": service.preparation_before_minutes if service else None,
+        "preparation_after_minutes":  service.preparation_after_minutes  if service else None,
+        "service_color":              service.color                      if service else None,
         "status": appointment.status,
         "source": appointment.source,
         "note": appointment.note,
@@ -441,7 +532,7 @@ def create_appointment(
     _check_no_blocked_time(db, data.employee_id, data.start_time, end_time, agent)
 
     # Step 8 — check no overlap (pass service so prep buffers are respected)
-    _check_no_overlap(db, data.employee_id, data.start_time, end_time, service=service)
+    _check_no_overlap(db, data.employee_id, data.start_time, end_time, service=service, tz=tz)
 
     # Step 8 — determine default status
     #if data.source.value in ("dashboard", "manual"):
@@ -611,6 +702,7 @@ def update_appointment(
 
     # check for conflicts if employee or time changed
     if data.employee_id or data.start_time:
+        tz = _get_tz(agent)
         _check_business_hours(db, agent, new_start_time, new_end_time)
         _check_employee_working_hours(db, new_employee_id, agent, new_start_time, new_end_time)
         _check_no_blocked_time(db, new_employee_id, new_start_time, new_end_time, agent)
@@ -618,6 +710,7 @@ def update_appointment(
             db, new_employee_id, new_start_time, new_end_time,
             service=service,
             exclude_appointment_id=appointment_id,
+            tz=tz,
         )
 
     # apply updates

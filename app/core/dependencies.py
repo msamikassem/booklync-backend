@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.core.security import decode_token
 from app.core.exceptions import UnauthorizedException
-from app.models.models import Business
+from app.models.models import Business, StaffAccount
 
 # HTTPBearer reads the Authorization: Bearer <token> header automatically
 bearer_scheme = HTTPBearer()
@@ -76,6 +76,13 @@ def get_current_business(
             code="INVALID_TOKEN_TYPE"
         )
 
+    # explicitly reject staff tokens — they must use /staff/* endpoints
+    if payload.get("account_type") == "staff":
+        raise UnauthorizedException(
+            detail="Staff tokens are not valid for this endpoint",
+            code="WRONG_TOKEN_TYPE"
+        )
+
     # get the business id from the token payload
     business_id = payload.get("sub")
 
@@ -105,3 +112,46 @@ def get_current_business(
 
     # Step 4 — return the business object to the endpoint
     return business
+
+
+def get_current_staff_account(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> StaffAccount:
+    """
+    Dependency that protects staff-only endpoints.
+
+    Validates a staff JWT and returns the loaded StaffAccount.
+    Scope (business_id, agent_id) is derived from the DB at request time —
+    not from token claims — so branch reassignments take effect immediately.
+    """
+    token = credentials.credentials
+    payload = decode_token(token)
+
+    if not payload:
+        raise UnauthorizedException(detail="Invalid or expired token", code="INVALID_TOKEN")
+
+    if payload.get("type") != "access":
+        raise UnauthorizedException(detail="Invalid token type", code="INVALID_TOKEN_TYPE")
+
+    if payload.get("account_type") != "staff":
+        raise UnauthorizedException(
+            detail="A staff token is required for this endpoint",
+            code="STAFF_TOKEN_REQUIRED",
+        )
+
+    staff_account_id = payload.get("sub")
+    if not staff_account_id:
+        raise UnauthorizedException(detail="Invalid token payload", code="INVALID_TOKEN")
+
+    staff = db.query(StaffAccount).filter(
+        StaffAccount.id == int(staff_account_id)
+    ).first()
+
+    if not staff:
+        raise UnauthorizedException(detail="Staff account not found", code="STAFF_NOT_FOUND")
+
+    if not staff.active:
+        raise UnauthorizedException(detail="This staff account is inactive", code="ACCOUNT_INACTIVE")
+
+    return staff

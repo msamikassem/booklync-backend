@@ -114,6 +114,10 @@ class AppointmentDetailResponse(BaseModel):
     end_time_local: Optional[datetime] = None
     timezone: Optional[str] = None
 
+    preparation_before_minutes: Optional[int] = None
+    preparation_after_minutes: Optional[int] = None
+    service_color: Optional[str] = None
+
     status: str
     source: str
     note: Optional[str] = None

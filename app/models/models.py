@@ -38,6 +38,12 @@ class AppointmentStatusEnum(str, enum.Enum):
     no_show    = "no_show"
 
 
+class InviteStatusEnum(str, enum.Enum):
+    pending  = "pending"
+    accepted = "accepted"
+    expired  = "expired"
+
+
 class AppointmentSourceEnum(str, enum.Enum):
     booking_page = "booking_page"
     manual       = "manual"
@@ -174,6 +180,8 @@ class Employee(Base):
     blocked_times = relationship("BlockedTime",         back_populates="employee", cascade="all, delete")
     capabilities  = relationship("EmployeeCapability",  back_populates="employee", cascade="all, delete")
     appointments  = relationship("Appointment",         back_populates="employee", cascade="all, delete")
+    staff_account = relationship("StaffAccount",        back_populates="employee", uselist=False, cascade="all, delete")
+    invites       = relationship("EmployeeInvite",      back_populates="employee", cascade="all, delete")
     # personal days off for this employee.
     days_off      = relationship(
         "DayOff",
@@ -610,6 +618,49 @@ class DayOff(Base):
     __table_args__ = (
         CheckConstraint("end_date >= start_date", name="ck_day_off_date_order"),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# StaffAccount
+# Auth identity for an employee who has been given dashboard access.
+# One-to-one with Employee; created when an invite is accepted.
+# ─────────────────────────────────────────────────────────────────────────────
+class StaffAccount(Base):
+    __tablename__ = "staff_accounts"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    employee_id   = Column(Integer, ForeignKey("employees.id"), nullable=False, unique=True)
+    email         = Column(Text, nullable=False, unique=True, index=True)
+    password_hash = Column(Text, nullable=False)
+    refresh_token = Column(Text, nullable=True)
+    last_login    = Column(DateTime(timezone=True), nullable=True)
+    active        = Column(Boolean, nullable=False, default=True)
+    created_at    = Column(DateTime(timezone=True), server_default=func.now())
+
+    employee = relationship("Employee", back_populates="staff_account")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EmployeeInvite
+# A pending dashboard-access invitation for an employee.
+# Token is stored as a bcrypt hash (raw token sent only in the email).
+# ─────────────────────────────────────────────────────────────────────────────
+class EmployeeInvite(Base):
+    __tablename__ = "employee_invites"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    employee_id  = Column(Integer, ForeignKey("employees.id"), nullable=False)
+    email        = Column(Text, nullable=False)
+    token_hash   = Column(Text, nullable=False, unique=True, index=True)
+    status       = Column(
+        PgEnum(InviteStatusEnum, name="invite_status_enum", create_type=True),
+        nullable=False,
+        default=InviteStatusEnum.pending,
+    )
+    expires_at   = Column(DateTime(timezone=True), nullable=False)
+    created_at   = Column(DateTime(timezone=True), server_default=func.now())
+
+    employee = relationship("Employee", back_populates="invites")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

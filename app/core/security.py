@@ -70,6 +70,30 @@ def create_refresh_token(subject: str | int) -> str:
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
+def create_staff_access_token(staff_account_id: int) -> str:
+    """Short-lived access token for a staff account. Scope is derived at request time from the DB."""
+    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "sub": str(staff_account_id),
+        "exp": expire,
+        "type": "access",
+        "account_type": "staff",
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def create_staff_refresh_token(staff_account_id: int) -> str:
+    """Long-lived refresh token for a staff account."""
+    expire = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    payload = {
+        "sub": str(staff_account_id),
+        "exp": expire,
+        "type": "refresh",
+        "account_type": "staff",
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
 def decode_token(token: str) -> Optional[dict]:
     """
     Decode and validate a JWT token.

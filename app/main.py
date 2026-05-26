@@ -34,8 +34,9 @@ from app.api.v1.endpoints import appointments
 from app.api.v1.endpoints import twilio_webhook
 from app.api.v1.endpoints import chat
 from app.api.v1.endpoints import voice
-from app.api.v1.endpoints import notifications   # ← new
+from app.api.v1.endpoints import notifications
 from app.api.v1.endpoints import public
+from app.api.v1.endpoints import staff_auth
 
 
 # ── Scheduler instance ────────────────────────────────────────────────────────
@@ -132,6 +133,7 @@ def create_app() -> FastAPI:
     app.include_router(voice.router,            prefix="/api/v1/voice",         tags=["Voice"])
     app.include_router(notifications.router,    prefix="/api/v1/notifications", tags=["Notifications"])
     app.include_router(public.router,           prefix="/api/v1/public",        tags=["Public"])
+    app.include_router(staff_auth.router,       prefix="/api/v1/staff",         tags=["Staff"])
 
     @app.get("/health", tags=["Health"])
     def health_check():
@@ -144,6 +146,10 @@ def create_app() -> FastAPI:
     @app.get("/b/{slug}", include_in_schema=False)
     def booking_page_redirect(slug: str):
         return RedirectResponse(url=f"/book.html?slug={slug}")
+
+    @app.get("/accept-invite", include_in_schema=False)
+    def accept_invite_redirect(token: str = ""):
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}/accept-invite.html?token={token}")
 
     # Serve the frontend static files at root (dev only — comes last so all
     # /api/* and named routes above take precedence).

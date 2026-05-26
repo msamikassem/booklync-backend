@@ -32,6 +32,8 @@ from app.schemas.employee import (
 )
 from app.services import employee_service
 from app.services import storage_service
+from app.services import staff_auth_service
+from app.schemas.staff_auth import StaffInviteRequest, InviteResponse
 
 router = APIRouter()
 
@@ -457,4 +459,33 @@ def remove_capability(
 ):
     return employee_service.remove_capability(
         db, employee_id, agent_id, capability_id, current_business.id
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAFF DASHBOARD INVITE
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/{employee_id}/invite",
+    response_model=InviteResponse,
+    status_code=200,
+    summary="Send a dashboard invite to an employee",
+)
+def invite_employee(
+    employee_id: int,
+    data: StaffInviteRequest,
+    db: Session = Depends(get_db),
+    current_business: Business = Depends(get_current_business),
+):
+    """
+    Send an email invitation so an employee can create their own dashboard login.
+    If the employee already has an email on file, the body can be empty ({}).
+    If a non-expired pending invite already exists, the link is refreshed and resent.
+    """
+    return staff_auth_service.send_invite(
+        db,
+        business_id=current_business.id,
+        employee_id=employee_id,
+        email=data.email,
     )

@@ -32,18 +32,22 @@ def send_sms(to: str, body: str, from_number: str = None) -> bool:
     Returns:
         True if sent successfully, False if failed
     """
-    try:
-        client = get_twilio_client()
-        message = client.messages.create(
-            to=to,
-            from_=from_number,
-            body=body,
-        )
-        logger.info(f"SMS sent: to={to} sid={message.sid}")
-        return True
-    except Exception as e:
-        logger.error(f"SMS failed: to={to} error={e}")
-        return False
+    # TEMPORARY: SMS sending disabled during local testing to avoid messaging real numbers.
+    logger.info(f"[SMS SUPPRESSED] to={to} from={from_number} body={body!r}")
+    return True
+
+    # try:
+    #     client = get_twilio_client()
+    #     message = client.messages.create(
+    #         to=to,
+    #         from_=from_number,
+    #         body=body,
+    #     )
+    #     logger.info(f"SMS sent: to={to} sid={message.sid}")
+    #     return True
+    # except Exception as e:
+    #     logger.error(f"SMS failed: to={to} error={e}")
+    #     return False
 
 
 def validate_twilio_signature(

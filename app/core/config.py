@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     # On Vercel hosting this is always cname.vercel-dns.com.
     CNAME_TARGET: str = "cname.vercel-dns.com"
 
+    # ── Staff invites & email ─────────────────────────────────────────────
+    RESEND_API_KEY: str = ""
+    # The verified "from" address in Resend (must match your verified domain).
+    EMAIL_FROM: str = "Booklync <noreply@booklync.com>"
+    # How many hours a pending invite link stays valid.
+    INVITE_EXPIRE_HOURS: int = 48
+
     # ── Logging ───────────────────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "logs/app.log"

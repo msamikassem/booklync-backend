@@ -29,6 +29,9 @@ apscheduler==3.10.4
 # Twilio
 twilio==9.1.0
 
+# Email (staff invites)
+resend==2.4.0
+
 # Logging
 loguru==0.7.2
 
