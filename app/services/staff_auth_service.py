@@ -320,11 +320,69 @@ def get_staff_me(db: Session, staff_account_id: int) -> dict:
         "email": staff.email,
         "active": staff.active,
         "employee_name": emp.name,
+        "profile_picture_url": emp.profile_picture_url,
         "agent_id": agent.id,
         "agent_name": agent.agent_name,
+        "timezone": agent.timezone,
         "business_id": agent.business_id,
         "business_name": agent.business.name,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAFF CALENDAR CONTEXT (read-only, scoped to the staff member's own employee/agent)
+#
+# These delegate to the same service functions the business-owner endpoints use,
+# passing the agent_id/business_id resolved from the staff JWT (never the request).
+# A staff member can therefore only ever read their own branch + their own schedule.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _resolve_agent(db: Session, staff: StaffAccount) -> AIAgent:
+    """Resolve the staff member's branch agent from the DB at request time."""
+    agent = db.query(AIAgent).filter(AIAgent.id == staff.employee.agent_id).first()
+    if not agent:
+        raise NotFoundException(detail="Agent not found")
+    return agent
+
+
+def get_staff_business_hours(db: Session, staff: StaffAccount) -> dict:
+    from app.services import business_hours_service
+    agent = _resolve_agent(db, staff)
+    return business_hours_service.get_business_hours(db, agent.id, agent.business_id)
+
+
+def get_staff_working_hours(db: Session, staff: StaffAccount) -> dict:
+    from app.services import employee_service
+    agent = _resolve_agent(db, staff)
+    return employee_service.get_working_hours(db, staff.employee_id, agent.id, agent.business_id)
+
+
+def get_staff_blocked_times(db: Session, staff: StaffAccount) -> dict:
+    from app.services import employee_service
+    agent = _resolve_agent(db, staff)
+    return employee_service.get_blocked_times(db, staff.employee_id, agent.id, agent.business_id)
+
+
+def get_staff_days_off(db: Session, staff: StaffAccount) -> dict:
+    """Branch-wide closures (employee_id IS NULL) plus this staff member's personal days off."""
+    from app.models.models import DayOff
+    agent = _resolve_agent(db, staff)
+    rows = (
+        db.query(DayOff)
+        .filter(
+            DayOff.agent_id == agent.id,
+            (DayOff.employee_id == None) | (DayOff.employee_id == staff.employee_id),  # noqa: E711
+        )
+        .order_by(DayOff.start_date)
+        .all()
+    )
+    return {"days_off": rows, "total": len(rows)}
+
+
+def get_staff_agent_time(db: Session, staff: StaffAccount) -> dict:
+    from app.services import availability_service
+    agent = _resolve_agent(db, staff)
+    return availability_service.get_agent_time(db, agent.id, agent.business_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

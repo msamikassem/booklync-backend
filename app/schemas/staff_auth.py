@@ -62,8 +62,10 @@ class StaffMeResponse(BaseModel):
     email: str
     active: bool
     employee_name: str
+    profile_picture_url: Optional[str] = None
     agent_id: int
     agent_name: str
+    timezone: Optional[str] = None
     business_id: int
     business_name: str
 

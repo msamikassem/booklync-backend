@@ -17,6 +17,9 @@ from app.core.dependencies import get_current_staff_account, get_db
 from app.models.models import AppointmentStatusEnum, StaffAccount
 from app.schemas.appointment import AppointmentListResponse, AppointmentDetailResponse
 from app.schemas.auth import MessageResponse
+from app.schemas.availability import AgentTimeResponse
+from app.schemas.business_hours import AgentDaysOffResponse, BusinessHoursResponse
+from app.schemas.employee import BlockedTimesResponse, WorkingHoursResponse
 from app.schemas.staff_auth import (
     AcceptInviteRequest,
     StaffAccessTokenResponse,
@@ -69,6 +72,53 @@ def staff_me(
 ):
     """Return profile of the currently authenticated staff member."""
     return staff_auth_service.get_staff_me(db, staff.id)
+
+
+# ── Calendar context (read-only, own branch + own schedule) ──────────────────
+
+@router.get("/time", response_model=AgentTimeResponse)
+def staff_agent_time(
+    db: Session = Depends(get_db),
+    staff: StaffAccount = Depends(get_current_staff_account),
+):
+    """Current wall-clock time for the staff member's branch (anchors the calendar 'now')."""
+    return staff_auth_service.get_staff_agent_time(db, staff)
+
+
+@router.get("/business-hours", response_model=BusinessHoursResponse)
+def staff_business_hours(
+    db: Session = Depends(get_db),
+    staff: StaffAccount = Depends(get_current_staff_account),
+):
+    """Weekly opening schedule for the staff member's branch."""
+    return staff_auth_service.get_staff_business_hours(db, staff)
+
+
+@router.get("/working-hours", response_model=WorkingHoursResponse)
+def staff_working_hours(
+    db: Session = Depends(get_db),
+    staff: StaffAccount = Depends(get_current_staff_account),
+):
+    """The staff member's own weekly working hours."""
+    return staff_auth_service.get_staff_working_hours(db, staff)
+
+
+@router.get("/blocked-times", response_model=BlockedTimesResponse)
+def staff_blocked_times(
+    db: Session = Depends(get_db),
+    staff: StaffAccount = Depends(get_current_staff_account),
+):
+    """The staff member's own recurring breaks."""
+    return staff_auth_service.get_staff_blocked_times(db, staff)
+
+
+@router.get("/days-off", response_model=AgentDaysOffResponse)
+def staff_days_off(
+    db: Session = Depends(get_db),
+    staff: StaffAccount = Depends(get_current_staff_account),
+):
+    """Branch-wide closures plus the staff member's own personal days off."""
+    return staff_auth_service.get_staff_days_off(db, staff)
 
 
 @router.get("/appointments", response_model=AppointmentListResponse)
