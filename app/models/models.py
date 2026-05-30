@@ -140,7 +140,7 @@ class AIAgent(Base):
     created_at    = Column(DateTime(timezone=True), server_default=func.now())
 
     business          = relationship("Business",             back_populates="agents")
-    employees         = relationship("Employee",             back_populates="agent",    cascade="all, delete")
+    employee_branches = relationship("EmployeeBranch",       back_populates="agent",    cascade="all, delete-orphan")
     business_hours    = relationship("BusinessHour",         back_populates="agent",    cascade="all, delete")
     service_titles    = relationship("ServiceTitle",          back_populates="agent",    cascade="all, delete")
     services          = relationship("Service",              back_populates="agent",    cascade="all, delete")
@@ -163,22 +163,22 @@ class Employee(Base):
     __tablename__ = "employees"
 
     id                  = Column(Integer, primary_key=True, autoincrement=True)
-    agent_id            = Column(Integer, ForeignKey("ai_agents.id"), nullable=False)
     name                = Column(Text, nullable=False)
     role                = Column(Text)
     phone               = Column(Text)
     email               = Column(Text)
-    active              = Column(Boolean, nullable=False, default=True)
     profile_picture_url = Column(Text, nullable=True)
     created_at          = Column(DateTime(timezone=True), server_default=func.now())
-    # track when the record was last modified.
     updated_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
     )
 
-    agent         = relationship("AIAgent",   back_populates="employees")
+    # Branch assignments live in the join table; each row carries the per-branch
+    # active + can_receive_bookings flags so the same person can be paused at
+    # one branch without affecting the others.
+    branches      = relationship("EmployeeBranch",      back_populates="employee", cascade="all, delete-orphan")
     working_hours = relationship("EmployeeWorkingHour", back_populates="employee", cascade="all, delete")
     blocked_times = relationship("BlockedTime",         back_populates="employee", cascade="all, delete")
     capabilities  = relationship("EmployeeCapability",  back_populates="employee", cascade="all, delete")
@@ -186,7 +186,6 @@ class Employee(Base):
     # Optional dashboard login linked to this employee (one-to-one; created via invite).
     user          = relationship("User",                back_populates="employee", uselist=False)
     invites       = relationship("UserInvite",          back_populates="employee", cascade="all, delete")
-    # personal days off for this employee.
     days_off      = relationship(
         "DayOff",
         back_populates="employee",
@@ -194,6 +193,32 @@ class Employee(Base):
         primaryjoin="DayOff.employee_id==Employee.id",
         foreign_keys="DayOff.employee_id",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EmployeeBranch
+# Join table: assigns an Employee to one of the business's AIAgents (branches)
+# with per-branch active and can_receive_bookings flags. A row here is the
+# source of truth for "does this employee belong to this branch?" — services
+# and the availability engine filter through it.
+# ─────────────────────────────────────────────────────────────────────────────
+class EmployeeBranch(Base):
+    __tablename__ = "employee_branches"
+
+    employee_id          = Column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), primary_key=True)
+    agent_id             = Column(Integer, ForeignKey("ai_agents.id", ondelete="CASCADE"), primary_key=True)
+    active               = Column(Boolean, nullable=False, default=True, server_default="true")
+    can_receive_bookings = Column(Boolean, nullable=False, default=True, server_default="true")
+    created_at           = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at           = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    employee = relationship("Employee", back_populates="branches")
+    agent    = relationship("AIAgent",  back_populates="employee_branches")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -205,17 +230,18 @@ class EmployeeWorkingHour(Base):
 
     id          = Column(Integer, primary_key=True, autoincrement=True)
     employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False)
-    # 0 = Monday … 6 = Sunday (ISO weekday convention).
+    # Per-branch weekly schedule: an employee can work different hours at
+    # different branches; UNIQUE is (employee, branch, weekday).
+    agent_id    = Column(Integer, ForeignKey("ai_agents.id", ondelete="CASCADE"), nullable=False)
     day_of_week = Column(Integer, nullable=False)
     start_time  = Column(Time, nullable=False)
     end_time    = Column(Time, nullable=False)
 
     employee = relationship("Employee", back_populates="working_hours")
+    agent    = relationship("AIAgent")
 
     __table_args__ = (
-        # enforce one row per employee per weekday.
-        UniqueConstraint("employee_id", "day_of_week", name="uq_employee_working_hour"),
-        # Validate weekday range at DB level.
+        UniqueConstraint("employee_id", "agent_id", "day_of_week", name="uq_employee_working_hour"),
         CheckConstraint("day_of_week >= 0 AND day_of_week <= 6", name="ck_day_of_week_range"),
     )
 
@@ -229,18 +255,20 @@ class BlockedTime(Base):
 
     id          = Column(Integer, primary_key=True, autoincrement=True)
     employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False)
+    # Recurring breaks are per-branch: an employee's lunch at branch A doesn't
+    # apply at branch B unless explicitly added there.
+    agent_id    = Column(Integer, ForeignKey("ai_agents.id", ondelete="CASCADE"), nullable=False)
     day_of_week = Column(Integer, nullable=False)
     start_time  = Column(Time, nullable=False)
     end_time    = Column(Time, nullable=False)
     reason      = Column(Text)
 
     employee = relationship("Employee", back_populates="blocked_times")
+    agent    = relationship("AIAgent")
 
     __table_args__ = (
-        # Sanity check: end must be after start.
         CheckConstraint("end_time > start_time", name="ck_blocked_time_order"),
         CheckConstraint("day_of_week >= 0 AND day_of_week <= 6", name="ck_day_of_week_range"),
-        # Index for fast "is this employee blocked on date X?" queries.
     )
 
 
@@ -777,8 +805,9 @@ class UserInvite(Base):
     __tablename__ = "user_invites"
 
     id          = Column(Integer, primary_key=True, autoincrement=True)
-    # The branch this invite grants access to, and the role at that branch.
-    agent_id    = Column(Integer, ForeignKey("ai_agents.id"), nullable=False)
+    # List of branch ids this invite grants access to. Same role is applied at
+    # every branch on accept (one UserBranchRole row per agent_id).
+    agent_ids   = Column(JSONB, nullable=False)
     role_id     = Column(Integer, ForeignKey("roles.id"),     nullable=False)
     # The employee being granted login access (must exist first).
     employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False)
@@ -792,7 +821,6 @@ class UserInvite(Base):
     expires_at  = Column(DateTime(timezone=True), nullable=False)
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
-    agent    = relationship("AIAgent")
     role     = relationship("Role")
     employee = relationship("Employee", back_populates="invites")
 

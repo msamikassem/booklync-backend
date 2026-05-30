@@ -28,58 +28,67 @@ router = APIRouter()
 
 @router.get("/me", response_model=StaffMeResponse)
 def staff_me(
+    agent_id: Optional[int] = Query(
+        None,
+        description="Optional branch override. Must be one of the branches in the user's accessible set; omit to use the primary (smallest id).",
+    ),
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
     """Return profile of the currently authenticated employee-linked user."""
-    return staff_auth_service.get_staff_me(db, current)
+    return staff_auth_service.get_staff_me(db, current, agent_id=agent_id)
 
 
 # ── Calendar context (read-only, own branch + own schedule) ──────────────────
 
 @router.get("/time", response_model=AgentTimeResponse)
 def staff_agent_time(
+    agent_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
     """Current wall-clock time for the user's branch (anchors the calendar 'now')."""
-    return staff_auth_service.get_staff_agent_time(db, current)
+    return staff_auth_service.get_staff_agent_time(db, current, agent_id=agent_id)
 
 
 @router.get("/business-hours", response_model=BusinessHoursResponse)
 def staff_business_hours(
+    agent_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
     """Weekly opening schedule for the user's branch."""
-    return staff_auth_service.get_staff_business_hours(db, current)
+    return staff_auth_service.get_staff_business_hours(db, current, agent_id=agent_id)
 
 
 @router.get("/working-hours", response_model=WorkingHoursResponse)
 def staff_working_hours(
+    agent_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
     """The user's own weekly working hours."""
-    return staff_auth_service.get_staff_working_hours(db, current)
+    return staff_auth_service.get_staff_working_hours(db, current, agent_id=agent_id)
 
 
 @router.get("/blocked-times", response_model=BlockedTimesResponse)
 def staff_blocked_times(
+    agent_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
     """The user's own recurring breaks."""
-    return staff_auth_service.get_staff_blocked_times(db, current)
+    return staff_auth_service.get_staff_blocked_times(db, current, agent_id=agent_id)
 
 
 @router.get("/days-off", response_model=AgentDaysOffResponse)
 def staff_days_off(
+    agent_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
     """Branch-wide closures plus the user's own personal days off."""
-    return staff_auth_service.get_staff_days_off(db, current)
+    return staff_auth_service.get_staff_days_off(db, current, agent_id=agent_id)
 
 
 @router.get("/appointments", response_model=AppointmentListResponse)
@@ -87,6 +96,7 @@ def staff_appointments(
     date_from: Optional[datetime] = Query(None),
     date_to: Optional[datetime] = Query(None),
     status: Optional[AppointmentStatusEnum] = Query(None),
+    agent_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
@@ -97,6 +107,7 @@ def staff_appointments(
         date_from=date_from,
         date_to=date_to,
         status=status.value if status else None,
+        agent_id=agent_id,
     )
 
 

@@ -19,6 +19,7 @@ from typing import Optional
 
 from loguru import logger
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core import rbac
 from app.core.config import settings
@@ -33,6 +34,7 @@ from app.core.security import hash_password, verify_password
 from app.models.models import (
     AIAgent,
     Employee,
+    EmployeeBranch,
     InviteStatusEnum,
     Role,
     User,
@@ -52,14 +54,30 @@ INVITABLE_ROLE_KEYS = {rbac.ROLE_BRANCH_MANAGER, rbac.ROLE_RECEPTIONIST, rbac.RO
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _load_employee_in_tenant(db: Session, employee_id: int, business_id: int) -> tuple[Employee, AIAgent]:
+def _load_employee_in_tenant(
+    db: Session, employee_id: int, business_id: int
+) -> tuple[Employee, list[AIAgent]]:
+    """
+    Load an Employee and the list of branches it belongs to inside the caller's
+    tenant. With multi-branch employees the second value is now a list (always
+    non-empty for a valid in-tenant employee).
+    """
     emp = db.query(Employee).filter(Employee.id == employee_id).first()
     if not emp:
         raise NotFoundException(detail="Employee not found", code="NOT_FOUND")
-    agent = db.query(AIAgent).filter(AIAgent.id == emp.agent_id).first()
-    if not agent or agent.business_id != business_id:
+    agents = (
+        db.query(AIAgent)
+        .join(EmployeeBranch, EmployeeBranch.agent_id == AIAgent.id)
+        .filter(
+            EmployeeBranch.employee_id == employee_id,
+            AIAgent.business_id == business_id,
+        )
+        .order_by(AIAgent.id)
+        .all()
+    )
+    if not agents:
         raise ForbiddenException(detail="You do not have access to this employee")
-    return emp, agent
+    return emp, agents
 
 
 def _resolve_invitable_role(db: Session, business_id: int, role_key: str) -> Role:
@@ -83,15 +101,50 @@ def send_invite(
     employee_id: int,
     role_key: str,
     email: Optional[str] = None,
+    agent_ids: Optional[list[int]] = None,
 ) -> dict:
     """
-    Invite an employee to create a dashboard login with the given role.
+    Invite an employee to create a dashboard login with the given role,
+    optionally scoped to a subset of branches the employee belongs to.
+
+    Defaults to every branch the employee is currently assigned to when
+    `agent_ids` is omitted (or empty). The same role is applied at every
+    selected branch on accept (one UserBranchRole per agent_id).
 
     Idempotent: refreshes a live pending invite rather than creating duplicates.
-    Caller must hold `invite_users` at the employee's branch (enforced here).
+    Caller must hold `invite_users` at EVERY selected branch.
     """
-    emp, agent = _load_employee_in_tenant(db, employee_id, current.business_id)
-    current.require(rbac.P_INVITE_USERS, agent_id=agent.id)
+    emp, agents = _load_employee_in_tenant(db, employee_id, current.business_id)
+    employee_branch_ids = [a.id for a in agents]
+
+    # Resolve the target branch list (defaults to the employee's full set).
+    if agent_ids:
+        # De-dupe while preserving order.
+        seen: set[int] = set()
+        target_ids: list[int] = []
+        for aid in agent_ids:
+            if aid in seen:
+                continue
+            seen.add(aid)
+            target_ids.append(aid)
+    else:
+        target_ids = list(employee_branch_ids)
+
+    if not target_ids:
+        raise AppException(
+            detail="Invite must cover at least one branch",
+            code="VALIDATION_ERROR",
+            status_code=422,
+        )
+
+    employee_branch_set = set(employee_branch_ids)
+    for aid in target_ids:
+        if aid not in employee_branch_set:
+            raise ForbiddenException(
+                detail=f"Employee is not assigned to branch id={aid}",
+                code="BRANCH_FORBIDDEN",
+            )
+        current.require(rbac.P_INVITE_USERS, agent_id=aid)
 
     role = _resolve_invitable_role(db, current.business_id, role_key)
 
@@ -128,11 +181,15 @@ def send_invite(
         existing.token_hash = hash_password(raw_token)
         existing.email = target_email
         existing.role_id = role.id
-        existing.agent_id = agent.id
+        existing.agent_ids = target_ids
+        # Per the project's JSONB rule: SQLAlchemy needs an explicit
+        # flag_modified after replacing a JSONB column or the change can be
+        # silently dropped on commit. (CLAUDE.md load-bearing rule.)
+        flag_modified(existing, "agent_ids")
         existing.expires_at = expires_at
     else:
         db.add(UserInvite(
-            agent_id=agent.id,
+            agent_ids=target_ids,
             role_id=role.id,
             employee_id=employee_id,
             email=target_email,
@@ -142,21 +199,111 @@ def send_invite(
         ))
     db.commit()
 
+    # Pick any branch in the invite to populate the business-name email field.
+    first_agent = agents[0]
     send_invite_email(
         to_email=target_email,
         invite_token=raw_token,
         employee_name=emp.name,
-        business_name=agent.business.name if agent.business else "Your employer",
+        business_name=first_agent.business.name if first_agent.business else "Your employer",
         api_base_url=settings.API_BASE_URL,
     )
 
-    logger.info(f"Invite sent to {target_email} (employee={employee_id}, role={role_key})")
+    logger.info(
+        f"Invite sent to {target_email} "
+        f"(employee={employee_id}, role={role_key}, branches={target_ids})"
+    )
     return {
         "message": "Invitation sent",
         "email": target_email,
         "role": role.key,
         "expires_at": expires_at,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CANCEL INVITE  (delete the live pending/expired invite for an employee)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def cancel_invite(db: Session, current: CurrentUser, employee_id: int) -> dict:
+    """
+    Delete the most recent UserInvite for an employee. Requires
+    `invite_users` at every branch the invite was about to grant access to —
+    symmetric with `send_invite`. If no live invite exists, raises 404.
+    The Employee row, profile, and schedule are untouched.
+    """
+    emp, _agents = _load_employee_in_tenant(db, employee_id, current.business_id)
+
+    invite = (
+        db.query(UserInvite)
+        .filter(UserInvite.employee_id == emp.id)
+        .order_by(UserInvite.created_at.desc())
+        .first()
+    )
+    if invite is None:
+        raise NotFoundException(
+            detail="No invitation to cancel", code="INVITE_NOT_FOUND"
+        )
+    if invite.status == InviteStatusEnum.accepted:
+        # An accepted invite is just history — there's no door to close.
+        raise ConflictException(
+            detail="This invitation has already been accepted; revoke the dashboard account instead",
+            code="INVITE_ACCEPTED",
+        )
+
+    # Permission: the caller must hold invite_users at every branch the
+    # invite would have covered (or owner via short-circuit).
+    for aid in list(invite.agent_ids or []):
+        current.require(rbac.P_INVITE_USERS, agent_id=aid)
+
+    db.delete(invite)
+    db.commit()
+
+    logger.info(
+        f"Invite cancelled for employee={employee_id} by user={current.id}"
+    )
+    return {"message": "Invitation cancelled"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REVOKE DASHBOARD ACCOUNT  (delete the User; preserve the Employee)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def revoke_employee_account(
+    db: Session, current: CurrentUser, employee_id: int
+) -> dict:
+    """
+    Delete the dashboard User account linked to an employee, cascading their
+    UserBranchRole rows. The Employee, profile picture, schedule and history
+    all survive (`User.employee_id` is the only thing destroyed; the
+    relationship is `ondelete=SET NULL` from the other direction).
+
+    Permission: `manage_users` — owner-only by default. Refuses to revoke
+    an owner account.
+    """
+    current.require(rbac.P_MANAGE_USERS)
+
+    emp, _agents = _load_employee_in_tenant(db, employee_id, current.business_id)
+    if emp.user is None:
+        raise NotFoundException(
+            detail="This employee has no dashboard account",
+            code="NO_DASHBOARD_ACCOUNT",
+        )
+    user = emp.user
+    if user.is_owner:
+        raise ForbiddenException(
+            detail="The owner account cannot be revoked from an employee card",
+            code="OWNER_PROTECTED",
+        )
+
+    db.delete(user)
+    db.commit()
+
+    logger.info(
+        f"Dashboard account revoked for employee={employee_id} "
+        f"(user={user.id}) by user={current.id}"
+    )
+    return {"message": "Dashboard access revoked"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -195,10 +342,24 @@ def accept_invite(db: Session, token: str, password: str) -> dict:
             code="EMAIL_TAKEN",
         )
 
-    agent = db.query(AIAgent).filter(AIAgent.id == invite.agent_id).first()
+    invite_agent_ids: list[int] = list(invite.agent_ids or [])
+    if not invite_agent_ids:
+        raise NotFoundException(
+            detail="Invitation has no branches assigned",
+            code="INVITE_NOT_FOUND",
+        )
+
+    # Use the first branch to anchor the new user's tenant; every other
+    # selected branch becomes an additional UserBranchRole row.
+    agents = (
+        db.query(AIAgent).filter(AIAgent.id.in_(invite_agent_ids)).all()
+    )
+    if not agents:
+        raise NotFoundException(detail="Branches no longer exist", code="AGENT_NOT_FOUND")
+    business_id = agents[0].business_id
 
     user = User(
-        business_id=agent.business_id,
+        business_id=business_id,
         employee_id=emp.id,
         email=invite.email,
         password_hash=hash_password(password),
@@ -208,13 +369,22 @@ def accept_invite(db: Session, token: str, password: str) -> dict:
     db.add(user)
     db.flush()
 
-    db.add(UserBranchRole(user_id=user.id, agent_id=invite.agent_id, role_id=invite.role_id))
+    granted_agent_ids: set[int] = set()
+    for aid in invite_agent_ids:
+        if aid in granted_agent_ids:
+            continue
+        granted_agent_ids.add(aid)
+        db.add(UserBranchRole(user_id=user.id, agent_id=aid, role_id=invite.role_id))
+
     invite.status = InviteStatusEnum.accepted
 
     tokens = issue_tokens(db, user)
     db.commit()
 
-    logger.info(f"Dashboard account created for employee={emp.id} (user={user.id}, email={invite.email})")
+    logger.info(
+        f"Dashboard account created for employee={emp.id} "
+        f"(user={user.id}, email={invite.email}, branches={sorted(granted_agent_ids)})"
+    )
     return tokens
 
 

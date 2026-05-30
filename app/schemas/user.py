@@ -16,11 +16,15 @@ from pydantic import BaseModel, EmailStr, Field
 class InviteUserRequest(BaseModel):
     """
     Body for POST /employees/{id}/invite.
-    `role` is a role key (branch_manager | receptionist | staff). The branch is
-    the employee's own branch. Email is optional if the employee already has one.
+    `role` is a role key (branch_manager | receptionist | staff) applied at
+    every selected branch. `agent_ids` is optional — when omitted, the invite
+    covers every branch the employee is currently assigned to. When provided
+    it must be a non-empty subset of those branches. Email is optional if the
+    employee already has one on file.
     """
     role: str
     email: Optional[EmailStr] = None
+    agent_ids: Optional[list[int]] = None
 
 
 class AcceptInviteRequest(BaseModel):

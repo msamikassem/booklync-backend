@@ -25,6 +25,7 @@ from app.models.models import (
     AIAgent,
     Customer,
     Employee,
+    EmployeeBranch,
     Service,
     ServiceVariation,
     DayOff,
@@ -247,6 +248,7 @@ def _check_no_blocked_time(
 
     blocked_times = db.query(BlockedTime).filter(
         BlockedTime.employee_id == employee_id,
+        BlockedTime.agent_id == agent.id,
         BlockedTime.day_of_week == day_of_week,
     ).all()
 
@@ -327,6 +329,7 @@ def _check_employee_working_hours(
 
     working_hour = db.query(EmployeeWorkingHour).filter(
         EmployeeWorkingHour.employee_id == employee_id,
+        EmployeeWorkingHour.agent_id == agent.id,
         EmployeeWorkingHour.day_of_week == day_of_week,
     ).first()
 
@@ -444,14 +447,26 @@ def create_appointment(
     if not customer:
         raise NotFoundException(detail="Customer not found")
 
-    # Step 3 — verify employee
-    employee = db.query(Employee).filter(
-        Employee.id == data.employee_id,
-        Employee.agent_id == data.agent_id,
-        Employee.active == True,
-    ).first()
+    # Step 3 — verify employee belongs to this branch and is active + bookable
+    # at this branch (per-branch flags live on EmployeeBranch).
+    branch = (
+        db.query(EmployeeBranch)
+        .filter(
+            EmployeeBranch.employee_id == data.employee_id,
+            EmployeeBranch.agent_id == data.agent_id,
+        )
+        .first()
+    )
+    if not branch or not branch.active:
+        raise NotFoundException(detail="Employee not found or inactive at this branch")
+    if not branch.can_receive_bookings:
+        raise ConflictException(
+            detail="This employee does not receive bookings at this branch",
+            code="EMPLOYEE_NOT_BOOKABLE",
+        )
+    employee = db.query(Employee).filter(Employee.id == data.employee_id).first()
     if not employee:
-        raise NotFoundException(detail="Employee not found or inactive")
+        raise NotFoundException(detail="Employee not found")
 
     # Step 4 — verify service
     service = db.query(Service).filter(
@@ -701,6 +716,25 @@ def update_appointment(
 
     new_employee_id = data.employee_id or appointment.employee_id
     new_start_time = data.start_time or appointment.start_time
+
+    # when reassigning, verify the new employee belongs to this branch and
+    # is active + bookable there.
+    if data.employee_id:
+        new_branch = (
+            db.query(EmployeeBranch)
+            .filter(
+                EmployeeBranch.employee_id == data.employee_id,
+                EmployeeBranch.agent_id == appointment.agent_id,
+            )
+            .first()
+        )
+        if not new_branch or not new_branch.active:
+            raise NotFoundException(detail="Employee not found or inactive at this branch")
+        if not new_branch.can_receive_bookings:
+            raise ConflictException(
+                detail="This employee does not receive bookings at this branch",
+                code="EMPLOYEE_NOT_BOOKABLE",
+            )
 
     # always load service — needed for prep-time checks and duration recalculation
     service = db.query(Service).filter(Service.id == appointment.service_id).first()

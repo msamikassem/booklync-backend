@@ -18,6 +18,7 @@ from app.models.models import (
     ServiceTitle,
     AIAgent,
     Employee,
+    EmployeeBranch,
     EmployeeCapability,
 )
 from app.schemas.service import (
@@ -543,14 +544,21 @@ def assign_employee(
 ) -> dict:
     get_service(db, service_id, agent_id, business_id)
 
-    employee = db.query(Employee).filter(
-        Employee.id == employee_id,
-        Employee.agent_id == agent_id,
-    ).first()
-    if not employee:
-        raise NotFoundException(
-            detail="Employee not found or does not belong to this agent"
+    branch_row = (
+        db.query(EmployeeBranch)
+        .filter(
+            EmployeeBranch.employee_id == employee_id,
+            EmployeeBranch.agent_id == agent_id,
         )
+        .first()
+    )
+    if not branch_row:
+        raise NotFoundException(
+            detail="Employee not found or does not belong to this branch"
+        )
+    employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    if not employee:
+        raise NotFoundException(detail="Employee not found")
 
     # block if already covered at service or title level
     service_obj = _get_service_for_agent(db, service_id, agent_id)
@@ -629,5 +637,24 @@ def get_service_employees(
         .subquery()
     )
 
-    employees = db.query(Employee).filter(Employee.id.in_(capable_emp_ids)).all()
+    # Limit to employees still assigned to this branch; surface the per-branch
+    # `active` flag (employee.active no longer exists — it's per-branch now).
+    rows = (
+        db.query(
+            Employee.id,
+            Employee.name,
+            Employee.role,
+            EmployeeBranch.active,
+        )
+        .join(EmployeeBranch, EmployeeBranch.employee_id == Employee.id)
+        .filter(
+            Employee.id.in_(capable_emp_ids),
+            EmployeeBranch.agent_id == agent_id,
+        )
+        .all()
+    )
+    employees = [
+        {"id": r.id, "name": r.name, "role": r.role, "active": r.active}
+        for r in rows
+    ]
     return {"employees": employees, "total": len(employees)}

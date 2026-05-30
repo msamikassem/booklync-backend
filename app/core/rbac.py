@@ -52,7 +52,9 @@ P_MESSAGE_CUSTOMERS = "message_customers"    # send SMS / chat to customers
 # Scheduling & catalogue
 P_MANAGE_SCHEDULES = "manage_schedules"      # working hours, breaks, days off
 P_MANAGE_SERVICES  = "manage_services"       # services, titles, variations, pricing
-P_MANAGE_EMPLOYEES = "manage_employees"      # create / edit / deactivate employees
+P_MANAGE_EMPLOYEES = "manage_employees"      # roster: create / delete employees, assign or unassign branches
+P_EDIT_EMPLOYEE_DETAILS = "edit_employee_details"    # name/role/phone/email/bookable, profile picture, capabilities (Services tab)
+P_TOGGLE_EMPLOYEE_STATUS = "toggle_employee_status"  # activate / deactivate an employee at a branch
 
 # Access control
 P_INVITE_USERS = "invite_users"              # send dashboard invitations
@@ -81,7 +83,9 @@ PERMISSIONS: list[dict] = [
 
     {"key": P_MANAGE_SCHEDULES,        "description": "Manage working hours, breaks and days off",          "category": "scheduling"},
     {"key": P_MANAGE_SERVICES,         "description": "Manage services, titles, variations and pricing",    "category": "catalogue"},
-    {"key": P_MANAGE_EMPLOYEES,        "description": "Create, edit and deactivate employees",              "category": "employees"},
+    {"key": P_MANAGE_EMPLOYEES,        "description": "Add, delete, and reassign employees across branches (roster)", "category": "employees"},
+    {"key": P_EDIT_EMPLOYEE_DETAILS,   "description": "Edit employee profile, photo, and service capabilities",       "category": "employees"},
+    {"key": P_TOGGLE_EMPLOYEE_STATUS,  "description": "Activate or deactivate an employee at a branch",     "category": "employees"},
 
     {"key": P_INVITE_USERS,            "description": "Invite people to dashboard accounts",                "category": "access"},
     {"key": P_MANAGE_USERS,            "description": "Manage dashboard users and branch assignments",      "category": "access"},
@@ -109,7 +113,13 @@ ROLE_PRESETS: dict[str, dict] = {
     },
     ROLE_BRANCH_MANAGER: {
         "name": "Branch Manager",
-        "description": "Runs assigned branches: appointments, schedules, services, employees. No billing or global settings.",
+        "description": "Runs assigned branches: appointments, schedules, services, and day-to-day employee admin. Cannot add, delete, or reassign employees across branches.",
+        # Branch managers run the floor — appointments, schedules, services,
+        # and the day-to-day employee admin (profile edits, photo, capability
+        # assignment, activating / deactivating). They **do not** own the
+        # roster: hiring (create), firing (delete), and assigning an
+        # employee to a different branch are reserved for the owner via
+        # `manage_employees`.
         "permissions": {
             P_MANAGE_APPOINTMENTS,
             P_RESCHEDULE_APPOINTMENTS,
@@ -118,7 +128,8 @@ ROLE_PRESETS: dict[str, dict] = {
             P_VIEW_CUSTOMERS,
             P_MANAGE_SCHEDULES,
             P_MANAGE_SERVICES,
-            P_MANAGE_EMPLOYEES,
+            P_EDIT_EMPLOYEE_DETAILS,
+            P_TOGGLE_EMPLOYEE_STATUS,
             P_INVITE_USERS,
         },
     },

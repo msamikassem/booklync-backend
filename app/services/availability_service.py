@@ -39,6 +39,7 @@ from app.models.models import (
     AIAgent,
     Service,
     Employee,
+    EmployeeBranch,
     BusinessHour,
     EmployeeWorkingHour,
     BlockedTime,
@@ -459,10 +460,17 @@ def _get_all_slots(
         or_(*cap_conditions)
     ).subquery()
 
-    employees_query = db.query(Employee).filter(
-        Employee.agent_id == agent.id,
-        Employee.active == True,
-        Employee.id.in_(capable_emp_ids),
+    # Employees assigned to THIS branch with the per-branch flags active +
+    # bookable. EmployeeBranch is the source of truth for branch membership.
+    employees_query = (
+        db.query(Employee)
+        .join(EmployeeBranch, EmployeeBranch.employee_id == Employee.id)
+        .filter(
+            EmployeeBranch.agent_id == agent.id,
+            EmployeeBranch.active.is_(True),
+            EmployeeBranch.can_receive_bookings.is_(True),
+            Employee.id.in_(capable_emp_ids),
+        )
     )
 
     if employee_id is not None:
@@ -479,6 +487,7 @@ def _get_all_slots(
         employee_slots = _get_employee_slots(
             db=db,
             employee=employee,
+            agent_id=agent.id,
             service=service,
             requested_date=requested_date,
             day_of_week=day_of_week,
@@ -498,6 +507,7 @@ def _get_all_slots(
 def _get_employee_slots(
     db: Session,
     employee,
+    agent_id: int,
     service,
     requested_date: date,
     day_of_week: int,
@@ -507,13 +517,14 @@ def _get_employee_slots(
     duration_minutes: int,
 ) -> list[EmployeeSlot]:
     """
-    Generate all valid slots for one employee on one date.
+    Generate all valid slots for one employee at one branch on one date.
     Excludes slots in the past or within MIN_ADVANCE_MINUTES.
     """
 
-    # check employee works this day
+    # check employee works this day at this branch
     working_hour = db.query(EmployeeWorkingHour).filter(
         EmployeeWorkingHour.employee_id == employee.id,
+        EmployeeWorkingHour.agent_id == agent_id,
         EmployeeWorkingHour.day_of_week == day_of_week,
     ).first()
 
@@ -556,9 +567,10 @@ def _get_employee_slots(
         .all()
     )
 
-    # get blocked times for this day of week
+    # get blocked times for this day of week at this branch
     blocked_times = db.query(BlockedTime).filter(
         BlockedTime.employee_id == employee.id,
+        BlockedTime.agent_id == agent_id,
         BlockedTime.day_of_week == day_of_week,
     ).all()
 

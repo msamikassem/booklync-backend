@@ -26,6 +26,7 @@ from app.core.dependencies import CurrentUser, get_current_user
 from app.schemas.employee import (
     EmployeeCreate,
     EmployeeUpdate,
+    AssignBranchRequest,
     WorkingHoursSet,
     BlockedTimeCreate,
     DayOffCreate,
@@ -56,20 +57,27 @@ def create_employee(
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
-    """Create a new employee under a branch. The agent_id is required in the body."""
-    current.require(rbac.P_MANAGE_EMPLOYEES, agent_id=data.agent_id)
+    """
+    Create a new employee and assign them to every branch in `agent_ids`.
+    Requires `manage_employees` at every selected branch — fail-fast on the
+    first branch the caller doesn't have permission for.
+    """
+    for agent_id in data.agent_ids:
+        current.require(rbac.P_MANAGE_EMPLOYEES, agent_id=agent_id)
     return employee_service.create_employee(db, data, current.business_id)
 
 
 @router.get("/", response_model=EmployeeListResponse, summary="Get all employees for an agent")
 def get_employees(
     agent_id: int = Query(..., description="The agent to get employees for"),
+    bookable_only: bool = Query(False, description="If true, only return employees with can_receive_bookings=true"),
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
-    """Returns all employees for a specific branch."""
+    """Returns all employees for a specific branch. Pass bookable_only=true to
+    restrict the list to staff who can take appointments."""
     current.require_branch(agent_id)
-    return employee_service.get_employees(db, agent_id, current.business_id)
+    return employee_service.get_employees(db, agent_id, current.business_id, bookable_only=bookable_only)
 
 
 @router.get("/{employee_id}", response_model=EmployeeResponse, summary="Get one specific employee")
@@ -91,7 +99,9 @@ def update_employee(
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
-    current.require(rbac.P_MANAGE_EMPLOYEES, agent_id=agent_id)
+    # Profile fields (name/role/phone/email/bookable) are day-to-day admin —
+    # branch managers run this without the full roster grant.
+    current.require(rbac.P_EDIT_EMPLOYEE_DETAILS, agent_id=agent_id)
     return employee_service.update_employee(db, employee_id, agent_id, data, current.business_id)
 
 
@@ -114,7 +124,10 @@ def activate_employee(
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
-    current.require(rbac.P_MANAGE_EMPLOYEES, agent_id=agent_id)
+    # Branch managers can pause/resume an employee at their branch without
+    # the broader manage_employees grant — toggle_employee_status is a strict
+    # subset (status flip only, no profile or roster changes).
+    current.require(rbac.P_TOGGLE_EMPLOYEE_STATUS, agent_id=agent_id)
     return employee_service.activate_employee(db, employee_id, agent_id, current.business_id)
 
 
@@ -125,8 +138,57 @@ def deactivate_employee(
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
-    current.require(rbac.P_MANAGE_EMPLOYEES, agent_id=agent_id)
+    current.require(rbac.P_TOGGLE_EMPLOYEE_STATUS, agent_id=agent_id)
     return employee_service.deactivate_employee(db, employee_id, agent_id, current.business_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BRANCH ASSIGNMENT  (assign / unassign an employee to/from a branch)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/{employee_id}/branches",
+    response_model=EmployeeResponse,
+    status_code=201,
+    summary="Assign an employee to an additional branch",
+)
+def assign_employee_branch(
+    employee_id: int,
+    data: AssignBranchRequest,
+    db: Session = Depends(get_db),
+    current: CurrentUser = Depends(get_current_user),
+):
+    """Adds the employee to a new branch. Caller needs `manage_employees` at
+    the target branch."""
+    current.require(rbac.P_MANAGE_EMPLOYEES, agent_id=data.agent_id)
+    return employee_service.assign_branch(
+        db,
+        employee_id,
+        data.agent_id,
+        current.business_id,
+        can_receive_bookings=data.can_receive_bookings,
+    )
+
+
+@router.delete(
+    "/{employee_id}/branches/{agent_id}",
+    response_model=MessageResponse,
+    summary="Remove an employee from a branch",
+)
+def unassign_employee_branch(
+    employee_id: int,
+    agent_id: int,
+    db: Session = Depends(get_db),
+    current: CurrentUser = Depends(get_current_user),
+):
+    """Removes the employee from one branch. Cascades per-branch hours,
+    breaks, and capabilities for that branch. Historical appointments are
+    preserved. Refuses to remove the employee's last remaining branch — use
+    DELETE /employees/{id} instead."""
+    current.require(rbac.P_MANAGE_EMPLOYEES, agent_id=agent_id)
+    return employee_service.unassign_branch(
+        db, employee_id, agent_id, current.business_id
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -142,10 +204,10 @@ async def upload_profile_picture(
     current: CurrentUser = Depends(get_current_user),
 ):
     """Upload a profile picture for an employee. Max size: 2MB."""
-    current.require(rbac.P_MANAGE_EMPLOYEES, agent_id=agent_id)
+    current.require(rbac.P_EDIT_EMPLOYEE_DETAILS, agent_id=agent_id)
     content = await file.read()
 
-    employee = employee_service.get_employee(db, employee_id, agent_id, current.business_id)
+    employee = employee_service._get_employee_orm(db, employee_id, agent_id, current.business_id)
     old_url = employee.profile_picture_url
 
     new_url = storage_service.upload_profile_picture(content, file.filename or "", employee_id)
@@ -163,8 +225,8 @@ def delete_profile_picture(
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
-    current.require(rbac.P_MANAGE_EMPLOYEES, agent_id=agent_id)
-    employee = employee_service.get_employee(db, employee_id, agent_id, current.business_id)
+    current.require(rbac.P_EDIT_EMPLOYEE_DETAILS, agent_id=agent_id)
+    employee = employee_service._get_employee_orm(db, employee_id, agent_id, current.business_id)
 
     if employee.profile_picture_url:
         storage_service.delete_profile_picture(employee.profile_picture_url)
@@ -318,7 +380,7 @@ def add_capability(
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
-    current.require(rbac.P_MANAGE_EMPLOYEES, agent_id=agent_id)
+    current.require(rbac.P_EDIT_EMPLOYEE_DETAILS, agent_id=agent_id)
     return employee_service.add_capability(
         db, employee_id, agent_id, current.business_id,
         title_id=data.title_id,
@@ -336,7 +398,7 @@ def remove_capability(
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
-    current.require(rbac.P_MANAGE_EMPLOYEES, agent_id=agent_id)
+    current.require(rbac.P_EDIT_EMPLOYEE_DETAILS, agent_id=agent_id)
     return employee_service.remove_capability(db, employee_id, agent_id, capability_id, current.business_id)
 
 
@@ -362,4 +424,38 @@ def invite_employee(
         employee_id=employee_id,
         role_key=data.role,
         email=data.email,
+        agent_ids=data.agent_ids,
+    )
+
+
+@router.delete(
+    "/{employee_id}/invite",
+    response_model=MessageResponse,
+    summary="Cancel the live pending or expired invitation",
+)
+def cancel_employee_invite(
+    employee_id: int,
+    db: Session = Depends(get_db),
+    current: CurrentUser = Depends(get_current_user),
+):
+    """Deletes the employee's most recent (non-accepted) invitation. Requires
+    `invite_users` at every branch the invite was scoped to."""
+    return user_service.cancel_invite(db, current=current, employee_id=employee_id)
+
+
+@router.delete(
+    "/{employee_id}/account",
+    response_model=MessageResponse,
+    summary="Revoke an employee's dashboard account",
+)
+def revoke_employee_account(
+    employee_id: int,
+    db: Session = Depends(get_db),
+    current: CurrentUser = Depends(get_current_user),
+):
+    """Deletes the User account linked to this employee (cascades all
+    UserBranchRole rows). Employee record + history are preserved. Requires
+    `manage_users` (owner-only by default)."""
+    return user_service.revoke_employee_account(
+        db, current=current, employee_id=employee_id
     )

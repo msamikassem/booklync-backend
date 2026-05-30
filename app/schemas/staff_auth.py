@@ -5,7 +5,7 @@ Pydantic schemas for staff authentication and invite flows.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -56,6 +56,12 @@ class StaffAccessTokenResponse(BaseModel):
 
 # ── Me ────────────────────────────────────────────────────────────────────────
 
+class StaffBranchSummary(BaseModel):
+    agent_id: int
+    agent_name: str
+    active: bool
+
+
 class StaffMeResponse(BaseModel):
     id: int
     employee_id: int
@@ -68,6 +74,7 @@ class StaffMeResponse(BaseModel):
     timezone: Optional[str] = None
     business_id: int
     business_name: str
+    branches: List[StaffBranchSummary] = []
 
 
 # ── Appointment status update (staff — restricted to terminal statuses) ───────
