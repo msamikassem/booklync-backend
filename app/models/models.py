@@ -182,7 +182,7 @@ class Employee(Base):
     working_hours = relationship("EmployeeWorkingHour", back_populates="employee", cascade="all, delete")
     blocked_times = relationship("BlockedTime",         back_populates="employee", cascade="all, delete")
     capabilities  = relationship("EmployeeCapability",  back_populates="employee", cascade="all, delete")
-    appointments  = relationship("Appointment",         back_populates="employee", cascade="all, delete")
+    appointments  = relationship("Appointment",         back_populates="employee", passive_deletes=True)
     # Optional dashboard login linked to this employee (one-to-one; created via invite).
     user          = relationship("User",                back_populates="employee", uselist=False)
     invites       = relationship("UserInvite",          back_populates="employee", cascade="all, delete")
@@ -380,7 +380,7 @@ class Service(Base):
     capabilities      = relationship("EmployeeCapability", back_populates="service",  cascade="all, delete",
                                     primaryjoin="EmployeeCapability.service_id==Service.id",
                                     foreign_keys="EmployeeCapability.service_id")
-    appointments      = relationship("Appointment",        back_populates="service", cascade="all, delete")
+    appointments      = relationship("Appointment",        back_populates="service", passive_deletes=True)
 
     __table_args__ = (
         CheckConstraint("duration_minutes IS NULL OR duration_minutes > 0",          name="ck_service_duration_positive"),
@@ -408,7 +408,7 @@ class ServiceVariation(Base):
     sort_order       = Column(Integer, nullable=False, default=0)
 
     service = relationship("Service", back_populates="variations")
-    appointments = relationship("Appointment", back_populates="variation", cascade="all, delete")
+    appointments = relationship("Appointment", back_populates="variation", passive_deletes=True)
 
     __table_args__ = (
         CheckConstraint("duration_minutes > 0", name="ck_variation_duration_positive"),
@@ -479,7 +479,7 @@ class Customer(Base):
 
     business          = relationship("Business",       back_populates="customers")
     conversation_logs = relationship("ConversationLog", back_populates="customer", cascade="all, delete")
-    appointments      = relationship("Appointment",    back_populates="customer", cascade="all, delete")
+    appointments      = relationship("Appointment",    back_populates="customer", passive_deletes=True)
 
     __table_args__ = (
         #a phone number is unique per business (not globally).
@@ -523,10 +523,16 @@ class Appointment(Base):
 
     id          = Column(Integer, primary_key=True, autoincrement=True)
     agent_id    = Column(Integer, ForeignKey("ai_agents.id"),  nullable=False)
-    customer_id = Column(Integer, ForeignKey("customers.id"),  nullable=False)
-    employee_id = Column(Integer, ForeignKey("employees.id"),  nullable=False)
-    service_id   = Column(Integer, ForeignKey("services.id"),            nullable=True)
-    variation_id = Column(Integer, ForeignKey("service_variations.id"),  nullable=True)
+    customer_id  = Column(Integer, ForeignKey("customers.id",             ondelete="SET NULL"), nullable=True)
+    employee_id  = Column(Integer, ForeignKey("employees.id",            ondelete="SET NULL"), nullable=True)
+    service_id   = Column(Integer, ForeignKey("services.id",             ondelete="SET NULL"), nullable=True)
+    variation_id = Column(Integer, ForeignKey("service_variations.id",   ondelete="SET NULL"), nullable=True)
+    # Snapshots at booking time so history survives deletion of the linked rows.
+    customer_name  = Column(Text, nullable=True)
+    customer_phone = Column(Text, nullable=True)
+    employee_name  = Column(Text, nullable=True)
+    service_name   = Column(Text, nullable=True)
+    variation_name = Column(Text, nullable=True)
     start_time   = Column(DateTime(timezone=True), nullable=False)
     end_time    = Column(DateTime(timezone=True), nullable=False)
     status      = Column(

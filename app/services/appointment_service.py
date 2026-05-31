@@ -384,14 +384,14 @@ def _build_detail(appointment, agent, customer, employee, service) -> dict:
         "agent_id": appointment.agent_id,
         "agent_name": agent.agent_name if agent else "Unknown",
         "customer_id": appointment.customer_id,
-        "customer_name": customer.name if customer else "Unknown",
-        "customer_phone": customer.phone if customer else "",
+        "customer_name": customer.name if customer else (appointment.customer_name or "Unknown"),
+        "customer_phone": customer.phone if customer else (appointment.customer_phone or ""),
         "employee_id": appointment.employee_id,
-        "employee_name": employee.name if employee else "Unknown",
+        "employee_name": employee.name if employee else (appointment.employee_name or "Unknown"),
         "service_id": appointment.service_id,
-        "service_name": service.name if service else None,
+        "service_name": service.name if service else appointment.service_name,
         "variation_id": appointment.variation_id,
-        "variation_name": appointment.variation.name if appointment.variation else None,
+        "variation_name": appointment.variation.name if appointment.variation else appointment.variation_name,
         # UTC times — use for all calculations
         "start_time": appointment.start_time,
         "end_time": appointment.end_time,
@@ -562,6 +562,11 @@ def create_appointment(
         employee_id=data.employee_id,
         service_id=data.service_id,
         variation_id=data.variation_id,
+        customer_name=customer.name if customer else None,
+        customer_phone=customer.phone if customer else None,
+        employee_name=employee.name if employee else None,
+        service_name=service.name if service else None,
+        variation_name=variation.name if variation else None,
         start_time=data.start_time,
         end_time=end_time,
         status=default_status,
@@ -630,8 +635,8 @@ def get_appointments(
 
     details = []
     for appt in appointments:
-        customer = db.query(Customer).filter(Customer.id == appt.customer_id).first()
-        employee = db.query(Employee).filter(Employee.id == appt.employee_id).first()
+        customer = db.query(Customer).filter(Customer.id == appt.customer_id).first() if appt.customer_id else None
+        employee = db.query(Employee).filter(Employee.id == appt.employee_id).first() if appt.employee_id else None
         service = db.query(Service).filter(Service.id == appt.service_id).first() if appt.service_id else None
         details.append(_build_detail(appt, agent, customer, employee, service))
 
@@ -660,8 +665,8 @@ def get_appointment(
         raise NotFoundException(detail="Appointment not found")
 
     agent = _get_agent_for_business(db, appointment.agent_id, business_id)
-    customer = db.query(Customer).filter(Customer.id == appointment.customer_id).first()
-    employee = db.query(Employee).filter(Employee.id == appointment.employee_id).first()
+    customer = db.query(Customer).filter(Customer.id == appointment.customer_id).first() if appointment.customer_id else None
+    employee = db.query(Employee).filter(Employee.id == appointment.employee_id).first() if appointment.employee_id else None
     service = db.query(Service).filter(Service.id == appointment.service_id).first() if appointment.service_id else None
 
     return _build_detail(appointment, agent, customer, employee, service)
@@ -778,8 +783,8 @@ def update_appointment(
         except Exception as e:
             logger.warning(f"Reschedule SMS failed for appointment {appointment.id}: {e}")
 
-    customer = db.query(Customer).filter(Customer.id == appointment.customer_id).first()
-    employee = db.query(Employee).filter(Employee.id == appointment.employee_id).first()
+    customer = db.query(Customer).filter(Customer.id == appointment.customer_id).first() if appointment.customer_id else None
+    employee = db.query(Employee).filter(Employee.id == appointment.employee_id).first() if appointment.employee_id else None
     service = db.query(Service).filter(Service.id == appointment.service_id).first() if appointment.service_id else None
 
     logger.info(f"Appointment updated: id={appointment_id}")
@@ -820,8 +825,8 @@ def update_appointment_status(
         except Exception as e:
             logger.warning(f"No-show SMS failed for appointment {appointment.id}: {e}")
 
-    customer = db.query(Customer).filter(Customer.id == appointment.customer_id).first()
-    employee = db.query(Employee).filter(Employee.id == appointment.employee_id).first()
+    customer = db.query(Customer).filter(Customer.id == appointment.customer_id).first() if appointment.customer_id else None
+    employee = db.query(Employee).filter(Employee.id == appointment.employee_id).first() if appointment.employee_id else None
     service = db.query(Service).filter(Service.id == appointment.service_id).first() if appointment.service_id else None
 
     logger.info(f"Appointment status: id={appointment_id} → {status}")
@@ -877,7 +882,7 @@ def get_customer_appointments(
     details = []
     for appt in appointments:
         agent = db.query(AIAgent).filter(AIAgent.id == appt.agent_id).first()
-        employee = db.query(Employee).filter(Employee.id == appt.employee_id).first()
+        employee = db.query(Employee).filter(Employee.id == appt.employee_id).first() if appt.employee_id else None
         service = db.query(Service).filter(Service.id == appt.service_id).first() if appt.service_id else None
         details.append(_build_detail(appt, agent, customer, employee, service))
 

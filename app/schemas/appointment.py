@@ -95,10 +95,10 @@ class AppointmentDetailResponse(BaseModel):
     id: int
     agent_id: int
     agent_name: str
-    customer_id: int
+    customer_id: Optional[int] = None
     customer_name: Optional[str] = None
-    customer_phone: str
-    employee_id: int
+    customer_phone: Optional[str] = None
+    employee_id: Optional[int] = None
     employee_name: str
     service_id: Optional[int] = None
     service_name: Optional[str] = None
