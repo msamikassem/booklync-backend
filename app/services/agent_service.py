@@ -78,6 +78,9 @@ def create_agent(db: Session, data: AgentCreate, business_id: int) -> AIAgent:
         model=data.model,
         sms_welcome_message=data.sms_welcome_message,
         sms_post_welcome_behavior=data.sms_post_welcome_behavior,
+        currency=data.currency,
+        tax_rate=data.tax_rate,
+        tax_inclusive=data.tax_inclusive,
         booking_page_slug=slug,
         active=False,    # agents start inactive until configured and ready
     )

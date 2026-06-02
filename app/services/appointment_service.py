@@ -813,9 +813,18 @@ def update_appointment_status(
 
     agent = _get_agent_for_business(db, appointment.agent_id, business_id)
 
+    # Capture the prior status before mutating so the financials hook can tell
+    # whether the appointment is entering or leaving the 'completed' state.
+    # Compare on .value (coercing either an enum member or a raw string) so the
+    # check is immune to which enum class `status`/`appointment.status` is.
+    _completed = AppointmentStatusEnum.completed.value
+    previously_completed = getattr(appointment.status, "value", appointment.status) == _completed
+
     appointment.status = status
     db.commit()
     db.refresh(appointment)
+
+    now_completed = getattr(status, "value", status) == _completed
 
     # send no-show follow-up if status was just set to no_show
     if status == AppointmentStatusEnum.no_show:
@@ -824,6 +833,34 @@ def update_appointment_status(
             send_no_show_followup(db, appointment.id)
         except Exception as e:
             logger.warning(f"No-show SMS failed for appointment {appointment.id}: {e}")
+
+    # Financials hook — keep the sales ledger in sync with the appointment.
+    # Resilient (own commit inside the service): a failure here is logged and
+    # never blocks the status change, which is already committed above.
+    _abandoned = getattr(status, "value", status) in (
+        AppointmentStatusEnum.cancelled.value, AppointmentStatusEnum.no_show.value
+    )
+    if now_completed != previously_completed:
+        try:
+            from app.services import financial_service
+            if now_completed:
+                financial_service.create_sale_for_appointment(db, appointment)
+            else:
+                financial_service.void_sale_for_appointment(db, appointment)
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"Financials hook failed for appointment {appointment.id}: {e}")
+    elif _abandoned and not previously_completed:
+        # Cancelled / no-show before completion. Single appointments have no sale
+        # yet (those are created on completion), so this is a no-op for them — but
+        # a combo's bundled sale is created at booking, so this reverses it as a
+        # unit when unpaid (paid sales are left intact for manual refund).
+        try:
+            from app.services import financial_service
+            financial_service.void_sale_for_appointment(db, appointment)
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"Financials void hook failed for appointment {appointment.id}: {e}")
 
     customer = db.query(Customer).filter(Customer.id == appointment.customer_id).first() if appointment.customer_id else None
     employee = db.query(Employee).filter(Employee.id == appointment.employee_id).first() if appointment.employee_id else None

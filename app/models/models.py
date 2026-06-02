@@ -59,6 +59,59 @@ class SubscriptionStatusEnum(str, enum.Enum):
     expired   = "expired"
 
 
+# ── Financials (merchant's own sales — NOT the SaaS subscription billing) ──────
+class SaleStatusEnum(str, enum.Enum):
+    open           = "open"            # created, nothing paid yet
+    partially_paid = "partially_paid"  # some payment recorded, balance remains
+    paid           = "paid"            # fully settled
+    refunded       = "refunded"        # 🔜 Phase ≥2
+    void           = "void"            # cancelled / reversed before payment
+
+
+class SaleLineKindEnum(str, enum.Enum):
+    service    = "service"     # a performed service (Phase 1)
+    product    = "product"     # 🔜 retail item, no appointment
+    package    = "package"     # 🔜 prepaid package purchase
+    adjustment = "adjustment"  # 🔜 refund / fee / manual line
+
+
+class PaymentMethodEnum(str, enum.Enum):
+    cash     = "cash"
+    card     = "card"
+    transfer = "transfer"
+    other    = "other"
+
+
+class DiscountTypeEnum(str, enum.Enum):
+    percent = "percent"   # `value` is a percentage 0–100
+    fixed   = "fixed"     # `value` is a money amount in the branch currency
+
+
+class DiscountScopeEnum(str, enum.Enum):
+    order = "order"   # reduces the whole sale (allocated pro-rata across lines)
+    line  = "line"    # reduces one specific line
+
+
+class CommissionTypeEnum(str, enum.Enum):
+    percent = "percent"   # `value` is a percentage of the commission base
+    flat    = "flat"      # `value` is a fixed money amount per line
+
+
+class CommissionBaseEnum(str, enum.Enum):
+    gross = "gross"   # commission computed before the line discount
+    net   = "net"     # commission computed after the line discount
+
+
+class BundleKindEnum(str, enum.Enum):
+    combo   = "combo"     # several services in one visit at a bundled price
+    package = "package"   # prepaid credit (sessions or a value wallet)
+
+
+class CreditKindEnum(str, enum.Enum):
+    sessions = "sessions"   # N redemptions of a specific service
+    value    = "value"      # a prepaid money wallet, any service
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # BusinessType
 # Controls which AI tools and which system prompt a business vertical gets.
@@ -97,6 +150,15 @@ class Business(Base):
     phone              = Column(Text, nullable=False, unique=True, index=True)
     subscription_plan  = Column(Text, default="free")
     active             = Column(Boolean, default=False)
+    # Commission policy (company-wide; per-branch rates live in CommissionRule).
+    # commission_base: compute the cut before (gross) or after (net) the discount.
+    # commission_includes_surcharge: count the employee's price surcharge in the base.
+    # Tips are always excluded from the commission base.
+    commission_base                = Column(
+        PgEnum(CommissionBaseEnum, name="commission_base_enum", create_type=True),
+        nullable=False, default=CommissionBaseEnum.gross, server_default=CommissionBaseEnum.gross.value,
+    )
+    commission_includes_surcharge  = Column(Boolean, nullable=False, default=True, server_default="true")
     created_at         = Column(DateTime(timezone=True), server_default=func.now())
     # updated_at auto-refreshes on every UPDATE.
     updated_at         = Column(
@@ -136,6 +198,11 @@ class AIAgent(Base):
     booking_page_slug = Column(Text, nullable=True, unique=True, index=True)
     custom_domain     = Column(Text, nullable=True, unique=True, index=True)
     domain_verified   = Column(Boolean, default=False, nullable=False, server_default="false")
+    # Financials are per-branch: a branch sets its own currency + tax. Every Sale
+    # snapshots this currency; never mix currencies inside one sale or report.
+    currency      = Column(String(3), nullable=False, default="USD", server_default="USD")  # ISO 4217
+    tax_rate      = Column(Numeric(5, 2), nullable=True)   # percent, e.g. 8.25 (null = no tax)
+    tax_inclusive = Column(Boolean, nullable=False, default=False, server_default="false")
     active        = Column(Boolean, default=False, nullable=False)
     created_at    = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -148,6 +215,8 @@ class AIAgent(Base):
     appointments      = relationship("Appointment",          back_populates="agent",    cascade="all, delete")
     subscriptions     = relationship("AIAgentSubscription",  back_populates="agent",    cascade="all, delete")
     features          = relationship("AgentFeature",         back_populates="agent",    cascade="all, delete")
+    sales             = relationship("Sale",                 back_populates="agent",    cascade="all, delete")
+    commission_rules  = relationship("CommissionRule",       back_populates="agent",    cascade="all, delete")
     user_branch_roles = relationship("UserBranchRole",       back_populates="agent",    cascade="all, delete")
     # agent-level days off (public holidays, full-branch closures).
     days_off          = relationship("DayOff",               back_populates="agent",    cascade="all, delete",
@@ -557,6 +626,390 @@ class Appointment(Base):
         CheckConstraint("end_time > start_time", name="ck_appointment_time_order"),
         Index("ix_appointment_agent_start", "agent_id", "start_time"),
         Index("ix_appointment_employee_start", "employee_id", "start_time"),
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FINANCIALS — the merchant's own sales ledger.
+#
+# NOT to be confused with AIAgentSubscription / AgentFeature, which are what
+# Booklync charges the business (SaaS billing). These tables are what the
+# business charges its customers.
+#
+#   Sale (order header) ─< SaleLineItem (one per service/product/package)
+#                       ─< Payment      (settlement ledger)
+#
+# Prices are SNAPSHOTTED on the line at sale time — later edits to Service.price
+# never rewrite history. Currency is per-branch (AIAgent.currency); never mix
+# currencies inside one Sale. See docs/modules/financials.md.
+# ═════════════════════════════════════════════════════════════════════════════
+class Sale(Base):
+    __tablename__ = "sales"
+
+    id                 = Column(Integer, primary_key=True, autoincrement=True)
+    agent_id           = Column(Integer, ForeignKey("ai_agents.id"), nullable=False)
+    # Preserve sales history if the customer/user is later deleted.
+    customer_id        = Column(Integer, ForeignKey("customers.id", ondelete="SET NULL"), nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("users.id",     ondelete="SET NULL"), nullable=True)
+    # Set when this sale is a combo or package purchase (Phase 4/5). A combo sale
+    # is priced as a unit → it reverses as a unit (see void_sale_for_appointment).
+    bundle_id          = Column(Integer, ForeignKey("bundles.id", ondelete="SET NULL"), nullable=True)
+    status             = Column(
+        PgEnum(SaleStatusEnum, name="sale_status_enum", create_type=True),
+        nullable=False,
+        default=SaleStatusEnum.open,
+        server_default=SaleStatusEnum.open.value,
+    )
+    # Snapshot of the branch currency at sale time (ISO 4217).
+    currency           = Column(String(3), nullable=False)
+    # Money totals. Invariant: total = subtotal - discount_total + tax_total + tip_total.
+    subtotal           = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")
+    discount_total     = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")
+    tax_total          = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")
+    tip_total          = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")
+    total              = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")
+    note               = Column(Text, nullable=True)
+    created_at         = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at         = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    agent      = relationship("AIAgent",  back_populates="sales")
+    customer   = relationship("Customer")
+    created_by = relationship("User")
+    line_items = relationship("SaleLineItem", back_populates="sale", cascade="all, delete-orphan")
+    payments   = relationship("Payment",      back_populates="sale", cascade="all, delete-orphan")
+    discounts  = relationship("SaleDiscount", back_populates="sale", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_sale_agent_created", "agent_id", "created_at"),
+        Index("ix_sale_customer", "customer_id"),
+    )
+
+
+class SaleLineItem(Base):
+    __tablename__ = "sale_line_items"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    sale_id      = Column(Integer, ForeignKey("sales.id", ondelete="CASCADE"), nullable=False)
+    kind         = Column(
+        PgEnum(SaleLineKindEnum, name="sale_line_kind_enum", create_type=True),
+        nullable=False,
+        default=SaleLineKindEnum.service,
+        server_default=SaleLineKindEnum.service.value,
+    )
+    # Snapshot targets — all nullable (a product/adjustment line has no service).
+    service_id   = Column(Integer, ForeignKey("services.id",            ondelete="SET NULL"), nullable=True)
+    variation_id = Column(Integer, ForeignKey("service_variations.id",  ondelete="SET NULL"), nullable=True)
+    appointment_id = Column(Integer, ForeignKey("appointments.id",      ondelete="SET NULL"), nullable=True)
+    # Phase 4/5: the bundle this line came from (combo line or package purchase),
+    # and the prepaid credit this line was redeemed against (→ free to the
+    # customer but still commissioned on full list value).
+    bundle_id    = Column(Integer, ForeignKey("bundles.id",         ondelete="SET NULL"), nullable=True)
+    redeemed_credit_id = Column(Integer, ForeignKey("package_credits.id", ondelete="SET NULL"), nullable=True)
+    # Who performed it → commission attribution.
+    employee_id  = Column(Integer, ForeignKey("employees.id",           ondelete="SET NULL"), nullable=True)
+    # Snapshot text so the line reads correctly even after the source rows change.
+    description   = Column(Text, nullable=True)
+    employee_name = Column(Text, nullable=True)
+    # Money.
+    qty             = Column(Numeric(10, 2), nullable=False, default=1, server_default="1")
+    unit_price      = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")
+    surcharge       = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")  # EmployeeCapability.extra_price snapshot
+    discount_amount = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")  # 🔜 Phase 2
+    tax_amount      = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")
+    tip_amount      = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")
+    line_total      = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")
+    # Commission (🔜 Phase 3 populates these; null/0 until then).
+    commission_rate   = Column(Numeric(5, 2),  nullable=True)
+    commission_amount = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")
+
+    sale      = relationship("Sale", back_populates="line_items")
+    service   = relationship("Service")
+    variation = relationship("ServiceVariation")
+    employee  = relationship("Employee")
+    appointment = relationship("Appointment")
+
+    __table_args__ = (
+        CheckConstraint("qty > 0", name="ck_sale_line_qty_positive"),
+        Index("ix_sale_line_sale", "sale_id"),
+        Index("ix_sale_line_employee", "employee_id"),
+        Index("ix_sale_line_appointment", "appointment_id"),
+    )
+
+
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    sale_id    = Column(Integer, ForeignKey("sales.id", ondelete="CASCADE"), nullable=False)
+    amount     = Column(Numeric(10, 2), nullable=False)
+    tip_amount = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")
+    method     = Column(
+        PgEnum(PaymentMethodEnum, name="payment_method_enum", create_type=True),
+        nullable=False,
+        default=PaymentMethodEnum.cash,
+    )
+    paid_at    = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    note       = Column(Text, nullable=True)
+    # Gateway-ready: dormant in v1 (internal bookkeeping only). A future Stripe
+    # integration fills these without a schema change.
+    provider     = Column(Text, nullable=True)   # e.g. "stripe"
+    provider_ref = Column(Text, nullable=True)   # charge / transaction id
+    intent_id    = Column(Text, nullable=True)   # payment-intent id
+    created_at   = Column(DateTime(timezone=True), server_default=func.now())
+
+    sale = relationship("Sale", back_populates="payments")
+
+    __table_args__ = (
+        CheckConstraint("amount >= 0", name="ck_payment_amount_non_negative"),
+        Index("ix_payment_sale", "sale_id"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Discount (Phase 2)
+# A reusable discount the business defines, per branch — an ad-hoc "10% off"
+# typed at the till, or a named promo code with a validity window and usage caps.
+# ─────────────────────────────────────────────────────────────────────────────
+class Discount(Base):
+    __tablename__ = "discounts"
+
+    id        = Column(Integer, primary_key=True, autoincrement=True)
+    agent_id  = Column(Integer, ForeignKey("ai_agents.id", ondelete="CASCADE"), nullable=False)
+    name      = Column(Text, nullable=False)
+    type      = Column(
+        PgEnum(DiscountTypeEnum, name="discount_type_enum", create_type=True),
+        nullable=False,
+    )
+    scope     = Column(
+        PgEnum(DiscountScopeEnum, name="discount_scope_enum", create_type=True),
+        nullable=False,
+        default=DiscountScopeEnum.order,
+        server_default=DiscountScopeEnum.order.value,
+    )
+    # percent → 0–100; fixed → money amount in the branch currency.
+    value     = Column(Numeric(10, 2), nullable=False)
+    # Optional promo code (unique per branch when set — partial unique index).
+    code      = Column(Text, nullable=True)
+    active    = Column(Boolean, nullable=False, default=True, server_default="true")
+    valid_from = Column(DateTime(timezone=True), nullable=True)
+    valid_to   = Column(DateTime(timezone=True), nullable=True)
+    # Usage caps (null = unlimited). Counted across non-void/refunded sales.
+    max_uses           = Column(Integer, nullable=True)
+    per_customer_limit = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    agent        = relationship("AIAgent")
+    applications = relationship("SaleDiscount", back_populates="discount")
+
+    __table_args__ = (
+        CheckConstraint("value > 0", name="ck_discount_value_positive"),
+        Index(
+            "uq_discount_agent_code",
+            "agent_id", "code",
+            unique=True,
+            postgresql_where=text("code IS NOT NULL"),
+        ),
+        Index("ix_discount_agent", "agent_id"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SaleDiscount (Phase 2)
+# One application of a discount to a sale. Snapshots the discount's terms at
+# apply time (so editing/deleting the catalogue Discount never rewrites history)
+# and stores the money it actually took off. line.discount_amount / sale.
+# discount_total are DERIVED from these rows on every recompute.
+# ─────────────────────────────────────────────────────────────────────────────
+class SaleDiscount(Base):
+    __tablename__ = "sale_discounts"
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    sale_id     = Column(Integer, ForeignKey("sales.id", ondelete="CASCADE"), nullable=False)
+    # null = ad-hoc discount typed at the till (no catalogue entry).
+    discount_id = Column(Integer, ForeignKey("discounts.id", ondelete="SET NULL"), nullable=True)
+    # Set for a line-scoped discount; null = order scope (allocated across lines).
+    sale_line_item_id = Column(Integer, ForeignKey("sale_line_items.id", ondelete="SET NULL"), nullable=True)
+    # Snapshot of the discount terms at apply time.
+    name   = Column(Text, nullable=True)
+    code   = Column(Text, nullable=True)
+    type   = Column(PgEnum(DiscountTypeEnum, name="discount_type_enum", create_type=False), nullable=False)
+    scope  = Column(PgEnum(DiscountScopeEnum, name="discount_scope_enum", create_type=False), nullable=False)
+    value  = Column(Numeric(10, 2), nullable=False)
+    # Money actually taken off this sale by this discount (recomputed on rebuild).
+    amount     = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    sale     = relationship("Sale", back_populates="discounts")
+    discount = relationship("Discount", back_populates="applications")
+    line     = relationship("SaleLineItem")
+
+    __table_args__ = (
+        Index("ix_sale_discount_sale", "sale_id"),
+        Index("ix_sale_discount_discount", "discount_id"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CommissionRule (Phase 3)
+# A per-branch rule granting an employee a cut of the work they perform. Targets
+# are optional and resolved most-specific-first (see financial_service):
+#   employee+variation → employee+service → employee+title → employee →
+#   variation → service → title → branch default (all targets null).
+# FKs CASCADE so a rule never silently broadens its scope when its target is
+# deleted. At most one of title/service/variation may be set (DB CHECK).
+# ─────────────────────────────────────────────────────────────────────────────
+class CommissionRule(Base):
+    __tablename__ = "commission_rules"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    agent_id     = Column(Integer, ForeignKey("ai_agents.id", ondelete="CASCADE"), nullable=False)
+    employee_id  = Column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=True)
+    title_id     = Column(Integer, ForeignKey("service_titles.id", ondelete="CASCADE"), nullable=True)
+    service_id   = Column(Integer, ForeignKey("services.id", ondelete="CASCADE"), nullable=True)
+    variation_id = Column(Integer, ForeignKey("service_variations.id", ondelete="CASCADE"), nullable=True)
+    type         = Column(
+        PgEnum(CommissionTypeEnum, name="commission_type_enum", create_type=True),
+        nullable=False,
+    )
+    # percent → 0–100; flat → money in the branch currency. 0 is a valid explicit
+    # override ("earns nothing on X", beating a broader rule).
+    value        = Column(Numeric(10, 2), nullable=False)
+    active       = Column(Boolean, nullable=False, default=True, server_default="true")
+    created_at   = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at   = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    agent     = relationship("AIAgent", back_populates="commission_rules")
+    employee  = relationship("Employee")
+    title     = relationship("ServiceTitle")
+    service   = relationship("Service")
+    variation = relationship("ServiceVariation")
+
+    __table_args__ = (
+        CheckConstraint("value >= 0", name="ck_commission_value_non_negative"),
+        CheckConstraint(
+            "(CASE WHEN title_id IS NOT NULL THEN 1 ELSE 0 END"
+            " + CASE WHEN service_id IS NOT NULL THEN 1 ELSE 0 END"
+            " + CASE WHEN variation_id IS NOT NULL THEN 1 ELSE 0 END) <= 1",
+            name="ck_commission_one_target",
+        ),
+        Index("ix_commission_rule_agent", "agent_id"),
+        Index("ix_commission_rule_employee", "employee_id"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bundle / BundleItem (Phase 4/5)
+# A per-branch combo (several services in one visit at a bundled price) or a
+# prepaid package (sessions of a service, or a value wallet). BundleItems list
+# the services involved; combos = the services performed, packages = the
+# services the sessions apply to.
+# ─────────────────────────────────────────────────────────────────────────────
+class Bundle(Base):
+    __tablename__ = "bundles"
+
+    id        = Column(Integer, primary_key=True, autoincrement=True)
+    agent_id  = Column(Integer, ForeignKey("ai_agents.id", ondelete="CASCADE"), nullable=False)
+    kind      = Column(
+        PgEnum(BundleKindEnum, name="bundle_kind_enum", create_type=True),
+        nullable=False,
+    )
+    name      = Column(Text, nullable=False)
+    # What the customer pays for the bundle (combo price, or package purchase price).
+    price     = Column(Numeric(10, 2), nullable=False)
+    active    = Column(Boolean, nullable=False, default=True, server_default="true")
+    # Package-only (null for combos):
+    credit_kind  = Column(PgEnum(CreditKindEnum, name="credit_kind_enum", create_type=True), nullable=True)
+    credit_value = Column(Numeric(10, 2), nullable=True)   # value-wallet amount granted (≥ price possible)
+    expires_days = Column(Integer, nullable=True)          # credit validity in days from purchase (null = never)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    agent = relationship("AIAgent")
+    items = relationship("BundleItem", back_populates="bundle", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        CheckConstraint("price >= 0", name="ck_bundle_price_non_negative"),
+        Index("ix_bundle_agent", "agent_id"),
+    )
+
+
+class BundleItem(Base):
+    __tablename__ = "bundle_items"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    bundle_id    = Column(Integer, ForeignKey("bundles.id", ondelete="CASCADE"), nullable=False)
+    service_id   = Column(Integer, ForeignKey("services.id",           ondelete="CASCADE"), nullable=True)
+    variation_id = Column(Integer, ForeignKey("service_variations.id", ondelete="CASCADE"), nullable=True)
+    qty          = Column(Integer, nullable=False, default=1, server_default="1")
+
+    bundle    = relationship("Bundle", back_populates="items")
+    service   = relationship("Service")
+    variation = relationship("ServiceVariation")
+
+    __table_args__ = (
+        CheckConstraint("qty > 0", name="ck_bundle_item_qty_positive"),
+        Index("ix_bundle_item_bundle", "bundle_id"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PackageCredit (Phase 5)
+# A customer's prepaid balance from buying a package, branch-scoped. Granted when
+# the package sale is PAID; redeemed by a free service line; restored when a
+# redemption is reversed; remaining revoked when the purchase is voided.
+# ─────────────────────────────────────────────────────────────────────────────
+class PackageCredit(Base):
+    __tablename__ = "package_credits"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    customer_id  = Column(Integer, ForeignKey("customers.id", ondelete="CASCADE"), nullable=False)
+    bundle_id    = Column(Integer, ForeignKey("bundles.id",   ondelete="SET NULL"), nullable=True)
+    agent_id     = Column(Integer, ForeignKey("ai_agents.id", ondelete="CASCADE"), nullable=False)
+    sale_id      = Column(Integer, ForeignKey("sales.id",     ondelete="SET NULL"), nullable=True)  # the purchase
+    kind         = Column(PgEnum(CreditKindEnum, name="credit_kind_enum", create_type=False), nullable=False)
+    # sessions: which service the sessions apply to; value: null (any service).
+    service_id   = Column(Integer, ForeignKey("services.id",           ondelete="SET NULL"), nullable=True)
+    variation_id = Column(Integer, ForeignKey("service_variations.id", ondelete="SET NULL"), nullable=True)
+    remaining_qty = Column(Integer, nullable=True)        # sessions remaining
+    balance       = Column(Numeric(10, 2), nullable=True) # value wallet remaining
+    currency     = Column(String(3), nullable=False)
+    expires_at   = Column(DateTime(timezone=True), nullable=True)
+    active       = Column(Boolean, nullable=False, default=True, server_default="true")  # false = revoked
+    created_at   = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at   = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    customer  = relationship("Customer")
+    bundle    = relationship("Bundle")
+    agent     = relationship("AIAgent")
+    sale      = relationship("Sale", foreign_keys=[sale_id])
+    service   = relationship("Service")
+    variation = relationship("ServiceVariation")
+
+    __table_args__ = (
+        Index("ix_package_credit_customer", "customer_id"),
+        Index("ix_package_credit_agent", "agent_id"),
+        Index("ix_package_credit_sale", "sale_id"),
     )
 
 

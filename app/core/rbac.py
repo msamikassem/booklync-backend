@@ -65,8 +65,13 @@ P_MANAGE_ROLES = "manage_roles"              # create / edit custom roles
 P_MANAGE_BRANCHES   = "manage_branches"      # create / configure branches (agents)
 P_MANAGE_AUTOMATIONS = "manage_automations"  # AI messaging / automation config
 P_ACCESS_ANALYTICS  = "access_analytics"
-P_ACCESS_BILLING    = "access_billing"
+P_ACCESS_BILLING    = "access_billing"       # SaaS subscription billing (what Booklync charges the business)
 P_MANAGE_SETTINGS   = "manage_settings"      # global company settings
+
+# Financials (the merchant's OWN sales — distinct from access_billing / SaaS)
+P_VIEW_FINANCIALS    = "view_financials"     # sales, payments, revenue reports
+P_MANAGE_DISCOUNTS   = "manage_discounts"    # create / edit the discount catalogue (Phase 2)
+P_MANAGE_COMMISSIONS = "manage_commissions"  # set employee commission rules (Phase 3)
 
 
 # Catalogue: (key, description, category)
@@ -96,6 +101,10 @@ PERMISSIONS: list[dict] = [
     {"key": P_ACCESS_ANALYTICS,        "description": "View analytics and reports",                         "category": "business"},
     {"key": P_ACCESS_BILLING,          "description": "View and manage billing and subscriptions",          "category": "business"},
     {"key": P_MANAGE_SETTINGS,         "description": "Manage global company settings",                     "category": "business"},
+
+    {"key": P_VIEW_FINANCIALS,         "description": "View sales, payments and revenue reports",           "category": "financials"},
+    {"key": P_MANAGE_DISCOUNTS,        "description": "Create and edit discounts and promo codes",          "category": "financials"},
+    {"key": P_MANAGE_COMMISSIONS,      "description": "Set employee commission rules",                      "category": "financials"},
 ]
 
 ALL_PERMISSION_KEYS: set[str] = {p["key"] for p in PERMISSIONS}

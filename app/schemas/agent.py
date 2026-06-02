@@ -13,6 +13,23 @@ An AI agent represents one deployed receptionist:
 from pydantic import BaseModel, field_validator
 from typing import Optional
 from datetime import datetime
+from decimal import Decimal
+
+
+def _validate_currency(value: Optional[str]) -> Optional[str]:
+    """Normalise + validate an ISO 4217 currency code (3 letters)."""
+    if value is None:
+        return value
+    v = value.strip().upper()
+    if len(v) != 3 or not v.isalpha():
+        raise ValueError("Currency must be a 3-letter ISO 4217 code (e.g. USD)")
+    return v
+
+
+def _validate_tax_rate(value: Optional[Decimal]) -> Optional[Decimal]:
+    if value is not None and (value < 0 or value > 100):
+        raise ValueError("Tax rate must be a percentage between 0 and 100")
+    return value
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31,6 +48,13 @@ class AgentCreate(BaseModel):
     model: str              # AI model to use e.g. "claude-sonnet-4-20250514"
     sms_welcome_message: Optional[str] = None
     sms_post_welcome_behavior: Optional[str] = "ai"
+    # Per-branch financials (see docs/modules/financials.md)
+    currency: str = "USD"                       # ISO 4217
+    tax_rate: Optional[Decimal] = None          # percent, e.g. 8.25 (null = no tax)
+    tax_inclusive: bool = False
+
+    _v_currency = field_validator("currency")(_validate_currency)
+    _v_tax_rate = field_validator("tax_rate")(_validate_tax_rate)
 
     @field_validator("agent_name")
     @classmethod
@@ -81,6 +105,12 @@ class AgentUpdate(BaseModel):
     model: Optional[str] = None
     sms_welcome_message: Optional[str] = None
     sms_post_welcome_behavior: Optional[str] = None
+    currency: Optional[str] = None
+    tax_rate: Optional[Decimal] = None
+    tax_inclusive: Optional[bool] = None
+
+    _v_currency = field_validator("currency")(_validate_currency)
+    _v_tax_rate = field_validator("tax_rate")(_validate_tax_rate)
 
     @field_validator("agent_name")
     @classmethod
@@ -124,6 +154,9 @@ class AgentResponse(BaseModel):
     booking_page_slug: Optional[str] = None
     custom_domain: Optional[str] = None
     domain_verified: bool = False
+    currency: str = "USD"
+    tax_rate: Optional[Decimal] = None
+    tax_inclusive: bool = False
     active: bool
     created_at: datetime
 
