@@ -14,8 +14,11 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-# Resolve the frontend directory relative to this file's location
-FRONTEND_DIR = Path(__file__).parent.parent.parent / "frontend"
+# Dev-only static serving points at the RELOCATED legacy vanilla-JS app
+# (~/booklync-frontend-old), NOT booklync/frontend — that is now the React/Vite
+# app, served by the Vite dev server (:5173), not as static files. The legacy app
+# still backs the public booking page (/b/{slug} → book.html) until it's ported.
+FRONTEND_DIR = Path(__file__).parent.parent.parent.parent / "booklync-frontend-old"
 
 from app.core.config import settings
 from app.core.logging import setup_logging
