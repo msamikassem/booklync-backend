@@ -15,7 +15,7 @@ source field:
     manual       — manually entered offline booking
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 from enum import Enum
@@ -59,6 +59,37 @@ class AppointmentCreate(BaseModel):
     start_time: datetime
     source: AppointmentSourceEnum
     note: Optional[str] = None
+
+
+class AppointmentItem(BaseModel):
+    """
+    One service line in a multi-service ("book several services in one visit")
+    request. Each line carries its own employee and optional variation; the
+    backend schedules the lines back-to-back in the order given.
+    """
+    service_id: int
+    variation_id: Optional[int] = None
+    employee_id: int
+
+
+class MultiAppointmentCreate(BaseModel):
+    """
+    Book several services for one customer in a single visit.
+
+    The services in `items` are scheduled back-to-back starting at `start_time`
+    (in the order given): the first runs at `start_time`, each subsequent service
+    begins when the previous one ends. Every line becomes its own independent
+    Appointment (own status / sale on completion); they are validated as a set
+    and committed atomically — if any line is unbookable, none are created.
+
+    end_time of each line is derived from its service/variation duration.
+    """
+    agent_id: int
+    customer_id: int
+    start_time: datetime
+    source: AppointmentSourceEnum
+    note: Optional[str] = None
+    items: list[AppointmentItem] = Field(..., min_length=1)
 
 
 class AppointmentUpdate(BaseModel):
@@ -121,6 +152,9 @@ class AppointmentDetailResponse(BaseModel):
     status: str
     source: str
     note: Optional[str] = None
+    # Set when this appointment was booked as part of a multi-service visit;
+    # all lines of one visit share the same id. NULL for single bookings.
+    booking_group_id: Optional[str] = None
     created_at: datetime
 
 

@@ -15,6 +15,7 @@ from app.core import rbac
 from app.core.dependencies import CurrentUser, get_current_user
 from app.schemas.appointment import (
     AppointmentCreate,
+    MultiAppointmentCreate,
     AppointmentUpdate,
     AppointmentStatusUpdate,
     AppointmentDetailResponse,
@@ -46,6 +47,29 @@ def create_appointment(
     """
     current.require(rbac.P_MANAGE_APPOINTMENTS, agent_id=data.agent_id)
     return appointment_service.create_appointment(db, data, current.business_id)
+
+
+@router.post(
+    "/batch",
+    response_model=AppointmentListResponse,
+    status_code=201,
+    summary="Book several services in one visit",
+)
+def create_appointments_batch(
+    data: MultiAppointmentCreate,
+    db: Session = Depends(get_db),
+    current: CurrentUser = Depends(get_current_user),
+):
+    """
+    Book multiple services for one customer in a single visit.
+
+    The services in `items` are scheduled back-to-back starting at `start_time`
+    (in the order given), each with its own employee. Every line becomes its own
+    independent appointment; they are validated as a set and created atomically —
+    if any line is unbookable, none are created.
+    """
+    current.require(rbac.P_MANAGE_APPOINTMENTS, agent_id=data.agent_id)
+    return appointment_service.create_appointments_batch(db, data, current.business_id)
 
 
 @router.get(

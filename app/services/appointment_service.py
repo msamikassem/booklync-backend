@@ -13,6 +13,7 @@ Creating an appointment runs overlap check first — never double-books.
 end_time is always calculated from service duration — never sent by caller.
 """
 from app.services.notification_service import send_appointment_notification,send_cancellation,send_confirmation,send_custom,send_no_show_followup
+import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -37,8 +38,10 @@ from app.schemas.appointment import (
     AppointmentCreate,
     AppointmentUpdate,
     AppointmentStatusEnum,
+    MultiAppointmentCreate,
 )
 from app.core.exceptions import (
+    AppException,
     NotFoundException,
     ForbiddenException,
     ConflictException,
@@ -163,14 +166,14 @@ def _check_no_overlap(
             if appt_prep_after.total_seconds() > 0:
                 m = int(appt_prep_after.total_seconds() // 60)
                 parts.append(
-                    f"the previous appointment requires {m} minute{'s' if m != 1 else ''} "
-                    f"of preparation time after it ends"
+                    f"a separate, already-booked appointment just before this slot requires "
+                    f"{m} minute{'s' if m != 1 else ''} of cleanup time after it ends"
                 )
             if prep_before_new.total_seconds() > 0:
                 m = int(prep_before_new.total_seconds() // 60)
                 parts.append(
                     f"this service requires {m} minute{'s' if m != 1 else ''} "
-                    f"of preparation before the appointment begins"
+                    f"of preparation before it begins"
                 )
 
             detail = (" and ".join(parts)).capitalize() + "."
@@ -192,13 +195,13 @@ def _check_no_overlap(
                 m = int(prep_after_new.total_seconds() // 60)
                 parts.append(
                     f"this service requires {m} minute{'s' if m != 1 else ''} "
-                    f"of preparation after the appointment ends"
+                    f"of cleanup time after it ends"
                 )
             if appt_prep_before.total_seconds() > 0:
                 m = int(appt_prep_before.total_seconds() // 60)
                 parts.append(
-                    f"the following appointment requires {m} minute{'s' if m != 1 else ''} "
-                    f"of preparation before it begins"
+                    f"a separate, already-booked appointment just after this slot requires "
+                    f"{m} minute{'s' if m != 1 else ''} of preparation before it begins"
                 )
 
             detail = (" and ".join(parts)).capitalize() + "."
@@ -354,6 +357,119 @@ def _check_employee_working_hours(
         )
 
 
+def _resolve_employee_at_branch(db: Session, employee_id: int, agent_id: int) -> Employee:
+    """
+    Verify an employee is assigned to a branch and is active + bookable there
+    (per-branch flags live on EmployeeBranch). Returns the Employee.
+
+    Shared by the single- and multi-service create paths.
+    """
+    branch = (
+        db.query(EmployeeBranch)
+        .filter(
+            EmployeeBranch.employee_id == employee_id,
+            EmployeeBranch.agent_id == agent_id,
+        )
+        .first()
+    )
+    if not branch or not branch.active:
+        raise NotFoundException(detail="Employee not found or inactive at this branch")
+    if not branch.can_receive_bookings:
+        raise ConflictException(
+            detail="This employee does not receive bookings at this branch",
+            code="EMPLOYEE_NOT_BOOKABLE",
+        )
+    employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    if not employee:
+        raise NotFoundException(detail="Employee not found")
+    return employee
+
+
+def _resolve_service_duration(db: Session, agent_id: int, service_id: int, variation_id: Optional[int]):
+    """
+    Verify a service (and variation, if given) belongs to the branch and is
+    active, and resolve the duration in minutes. Returns (service, variation,
+    duration_minutes). Shared by the single- and multi-service create paths.
+    """
+    service = db.query(Service).filter(
+        Service.id == service_id,
+        Service.agent_id == agent_id,
+        Service.active == True,
+    ).first()
+    if not service:
+        raise NotFoundException(detail="Service not found or inactive")
+
+    variation = None
+    if variation_id:
+        variation = db.query(ServiceVariation).filter(
+            ServiceVariation.id == variation_id,
+            ServiceVariation.service_id == service_id,
+            ServiceVariation.active == True,
+        ).first()
+        if not variation:
+            raise NotFoundException(detail="Service variation not found or inactive")
+        duration_minutes = variation.duration_minutes
+    elif service.duration_minutes:
+        duration_minutes = service.duration_minutes
+    else:
+        raise ConflictException(
+            detail="This service requires a variation to be selected",
+            code="VARIATION_REQUIRED",
+        )
+    return service, variation, duration_minutes
+
+
+def _check_day_offs(db: Session, agent: AIAgent, employee_id: int, appt_date) -> None:
+    """Raise if the branch is closed or the employee is off on the given date."""
+    branch_day_off = db.query(DayOff).filter(
+        DayOff.agent_id == agent.id,
+        DayOff.employee_id == None,  # noqa: E711
+        DayOff.start_date <= appt_date,
+        DayOff.end_date >= appt_date,
+    ).first()
+    if branch_day_off:
+        raise SlotUnavailableException(
+            detail=f"Branch is closed on this date ({branch_day_off.name or 'day off'})",
+            code="BRANCH_DAY_OFF",
+        )
+
+    emp_day_off = db.query(DayOff).filter(
+        DayOff.agent_id == agent.id,
+        DayOff.employee_id == employee_id,
+        DayOff.start_date <= appt_date,
+        DayOff.end_date >= appt_date,
+    ).first()
+    if emp_day_off:
+        raise SlotUnavailableException(
+            detail=f"Employee has a day off on this date ({emp_day_off.name or 'day off'})",
+            code="EMPLOYEE_DAY_OFF",
+        )
+
+
+def _validate_appointment_slot(
+    db: Session,
+    agent: AIAgent,
+    employee_id: int,
+    start_time: datetime,
+    end_time: datetime,
+    service: Optional[Service],
+    exclude_appointment_id: Optional[int] = None,
+    tz=None,
+) -> None:
+    """
+    Run the full per-slot validation chain (business hours, employee working
+    hours, blocked breaks, prep-aware overlap). Shared by the single- and
+    multi-service create paths and the update path.
+    """
+    _check_business_hours(db, agent, start_time, end_time)
+    _check_employee_working_hours(db, employee_id, agent, start_time, end_time)
+    _check_no_blocked_time(db, employee_id, start_time, end_time, agent)
+    _check_no_overlap(
+        db, employee_id, start_time, end_time,
+        service=service, exclude_appointment_id=exclude_appointment_id, tz=tz,
+    )
+
+
 def _build_detail(appointment, agent, customer, employee, service) -> dict:
     """
     Build the full appointment detail dict.
@@ -405,6 +521,7 @@ def _build_detail(appointment, agent, customer, employee, service) -> dict:
         "status": appointment.status,
         "source": appointment.source,
         "note": appointment.note,
+        "booking_group_id": appointment.booking_group_id,
         "created_at": appointment.created_at,
     }
 
@@ -449,52 +566,12 @@ def create_appointment(
 
     # Step 3 — verify employee belongs to this branch and is active + bookable
     # at this branch (per-branch flags live on EmployeeBranch).
-    branch = (
-        db.query(EmployeeBranch)
-        .filter(
-            EmployeeBranch.employee_id == data.employee_id,
-            EmployeeBranch.agent_id == data.agent_id,
-        )
-        .first()
+    employee = _resolve_employee_at_branch(db, data.employee_id, data.agent_id)
+
+    # Step 4 — verify service + variation (if provided) and resolve duration
+    service, variation, duration_minutes = _resolve_service_duration(
+        db, data.agent_id, data.service_id, data.variation_id
     )
-    if not branch or not branch.active:
-        raise NotFoundException(detail="Employee not found or inactive at this branch")
-    if not branch.can_receive_bookings:
-        raise ConflictException(
-            detail="This employee does not receive bookings at this branch",
-            code="EMPLOYEE_NOT_BOOKABLE",
-        )
-    employee = db.query(Employee).filter(Employee.id == data.employee_id).first()
-    if not employee:
-        raise NotFoundException(detail="Employee not found")
-
-    # Step 4 — verify service
-    service = db.query(Service).filter(
-        Service.id == data.service_id,
-        Service.agent_id == data.agent_id,
-        Service.active == True,
-    ).first()
-    if not service:
-        raise NotFoundException(detail="Service not found or inactive")
-
-    # Step 4b — verify variation (if provided) and resolve duration
-    variation = None
-    if data.variation_id:
-        variation = db.query(ServiceVariation).filter(
-            ServiceVariation.id == data.variation_id,
-            ServiceVariation.service_id == data.service_id,
-            ServiceVariation.active == True,
-        ).first()
-        if not variation:
-            raise NotFoundException(detail="Service variation not found or inactive")
-        duration_minutes = variation.duration_minutes
-    elif service.duration_minutes:
-        duration_minutes = service.duration_minutes
-    else:
-        raise ConflictException(
-            detail="This service requires a variation to be selected",
-            code="VARIATION_REQUIRED"
-        )
 
     # Step 5 — calculate end_time
     end_time = data.start_time + timedelta(minutes=duration_minutes)
@@ -510,44 +587,14 @@ def create_appointment(
             code="PAST_APPOINTMENT"
         )
 
-    # Step 7 — check branch-wide day off
+    # Step 7 — check branch-wide + employee day off
     appt_date = start_aware.date()
-    branch_day_off = db.query(DayOff).filter(
-        DayOff.agent_id == data.agent_id,
-        DayOff.employee_id == None,
-        DayOff.start_date <= appt_date,
-        DayOff.end_date >= appt_date,
-    ).first()
-    if branch_day_off:
-        raise SlotUnavailableException(
-            detail=f"Branch is closed on this date ({branch_day_off.name or 'day off'})",
-            code="BRANCH_DAY_OFF"
-        )
+    _check_day_offs(db, agent, data.employee_id, appt_date)
 
-    # Step 7b — check employee personal day off
-    emp_day_off = db.query(DayOff).filter(
-        DayOff.agent_id == data.agent_id,
-        DayOff.employee_id == data.employee_id,
-        DayOff.start_date <= appt_date,
-        DayOff.end_date >= appt_date,
-    ).first()
-    if emp_day_off:
-        raise SlotUnavailableException(
-            detail=f"Employee has a day off on this date ({emp_day_off.name or 'day off'})",
-            code="EMPLOYEE_DAY_OFF"
-        )
-
-    # Step 7c — check appointment is within business hours
-    _check_business_hours(db, agent, data.start_time, end_time)
-
-    # Step 7d — check appointment is within employee working hours
-    _check_employee_working_hours(db, data.employee_id, agent, data.start_time, end_time)
-
-    # Step 7e — check no blocked time (break) conflict
-    _check_no_blocked_time(db, data.employee_id, data.start_time, end_time, agent)
-
-    # Step 8 — check no overlap (pass service so prep buffers are respected)
-    _check_no_overlap(db, data.employee_id, data.start_time, end_time, service=service, tz=tz)
+    # Step 7b — business hours, working hours, blocked breaks, prep-aware overlap
+    _validate_appointment_slot(
+        db, agent, data.employee_id, data.start_time, end_time, service, tz=tz
+    )
 
     # Step 8 — determine default status
     #if data.source.value in ("dashboard", "manual"):
@@ -593,6 +640,140 @@ def create_appointment(
     )
 
     return _build_detail(appointment, agent, customer, employee, service)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CREATE — MULTI-SERVICE (book several services in one visit)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def create_appointments_batch(
+    db: Session,
+    data: MultiAppointmentCreate,
+    business_id: int,
+) -> dict:
+    """
+    Book several services for one customer in a single visit.
+
+    The services in `data.items` are scheduled **back-to-back** in the order
+    given, starting at `data.start_time`: the first runs at `start_time`, each
+    subsequent service begins exactly when the previous one ends. Each line
+    becomes its own independent Appointment (its own status / sale on
+    completion), but they are validated as a set and committed in ONE
+    transaction — if any line is unbookable, none are created.
+
+    Prep buffers are enforced against existing appointments (per line), but are
+    deliberately **relaxed between the customer's own consecutive services in
+    this batch** — they are sitting in the chair the whole time, so the lines
+    run contiguously. (This mirrors how a combo relaxes inter-service prep.)
+    """
+    # Step 1 — verify agent + customer (once for the whole visit)
+    agent = _get_agent_for_business(db, data.agent_id, business_id)
+
+    customer = db.query(Customer).filter(
+        Customer.id == data.customer_id,
+        Customer.business_id == business_id,
+    ).first()
+    if not customer:
+        raise NotFoundException(detail="Customer not found")
+
+    if not data.items:
+        raise ConflictException(detail="At least one service is required", code="NO_SERVICES")
+
+    # Step 2 — reject a start in the past (checked once on the visit start)
+    tz = _get_tz(agent)
+    now = datetime.now(tz)
+    start_aware = _ensure_tz_aware(data.start_time, tz)
+    if start_aware < now:
+        raise ConflictException(
+            detail="Cannot create an appointment in the past",
+            code="PAST_APPOINTMENT",
+        )
+
+    # Step 3 — resolve every line and compute its sequential [start, end] window.
+    # The chain is strictly sequential (each line starts where the previous ends),
+    # so two lines for the same employee can never overlap by construction.
+    resolved = []
+    cursor = data.start_time
+    for item in data.items:
+        employee = _resolve_employee_at_branch(db, item.employee_id, data.agent_id)
+        service, variation, duration_minutes = _resolve_service_duration(
+            db, data.agent_id, item.service_id, item.variation_id
+        )
+        item_start = cursor
+        item_end = cursor + timedelta(minutes=duration_minutes)
+        resolved.append({
+            "employee": employee,
+            "service": service,
+            "variation": variation,
+            "start": item_start,
+            "end": item_end,
+        })
+        cursor = item_end
+
+    # Step 4 — validate each line against the day-offs / hours / breaks / existing
+    # appointments. Nothing has been persisted yet, so a line's prep-aware overlap
+    # check never trips against a sibling line (intended: prep relaxed within the
+    # visit). On failure, prefix the offending service name so the UI can point
+    # at the right row, preserving the original error code.
+    for r in resolved:
+        # Match create_appointment: the day-off date is the UTC date of the start.
+        appt_date = _ensure_tz_aware(r["start"], tz).date()
+        try:
+            _check_day_offs(db, agent, r["employee"].id, appt_date)
+            _validate_appointment_slot(
+                db, agent, r["employee"].id, r["start"], r["end"], r["service"], tz=tz
+            )
+        except AppException as exc:
+            exc.detail = f"{r['service'].name}: {exc.detail}"
+            raise
+
+    # Step 5 — create every appointment, then commit once (all-or-nothing).
+    # A shared group id links the lines as one visit (only meaningful for ≥2).
+    group_id = str(uuid.uuid4()) if len(resolved) > 1 else None
+    appointments = []
+    for r in resolved:
+        appt = Appointment(
+            agent_id=data.agent_id,
+            customer_id=data.customer_id,
+            employee_id=r["employee"].id,
+            service_id=r["service"].id,
+            variation_id=r["variation"].id if r["variation"] else None,
+            customer_name=customer.name,
+            customer_phone=customer.phone,
+            employee_name=r["employee"].name,
+            service_name=r["service"].name,
+            variation_name=r["variation"].name if r["variation"] else None,
+            start_time=r["start"],
+            end_time=r["end"],
+            status=AppointmentStatusEnum.confirmed,
+            source=data.source,
+            note=data.note,
+            booking_group_id=group_id,
+        )
+        db.add(appt)
+        appointments.append(appt)
+
+    db.commit()
+    for appt in appointments:
+        db.refresh(appt)
+
+    # Step 6 — one confirmation SMS for the whole visit (not one per service).
+    try:
+        from app.services.notification_service import send_confirmation
+        send_confirmation(db, appointments[0].id)
+    except Exception as e:
+        logger.warning(f"Confirmation SMS failed for multi-service booking (first appt {appointments[0].id}): {e}")
+
+    logger.info(
+        f"Multi-service booking created: customer='{customer.name}' "
+        f"appts={[a.id for a in appointments]} start={data.start_time} source={data.source}"
+    )
+
+    details = [
+        _build_detail(appt, agent, customer, r["employee"], r["service"])
+        for appt, r in zip(appointments, resolved)
+    ]
+    return {"appointments": details, "total": len(details)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -754,14 +935,9 @@ def update_appointment(
     # check for conflicts if employee or time changed
     if data.employee_id or data.start_time:
         tz = _get_tz(agent)
-        _check_business_hours(db, agent, new_start_time, new_end_time)
-        _check_employee_working_hours(db, new_employee_id, agent, new_start_time, new_end_time)
-        _check_no_blocked_time(db, new_employee_id, new_start_time, new_end_time, agent)
-        _check_no_overlap(
-            db, new_employee_id, new_start_time, new_end_time,
-            service=service,
-            exclude_appointment_id=appointment_id,
-            tz=tz,
+        _validate_appointment_slot(
+            db, agent, new_employee_id, new_start_time, new_end_time,
+            service, exclude_appointment_id=appointment_id, tz=tz,
         )
 
     # apply updates

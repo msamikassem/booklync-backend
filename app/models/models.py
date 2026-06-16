@@ -614,6 +614,10 @@ class Appointment(Base):
         nullable=False,
     )
     note        = Column(Text)
+    # Links the appointments booked together as one multi-service visit (set by
+    # create_appointments_batch when >1 service). NULL for single bookings. The
+    # dashboard calendar merges contiguous same-employee lines sharing this id.
+    booking_group_id = Column(Text, nullable=True)
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
     agent     = relationship("AIAgent",          back_populates="appointments")
