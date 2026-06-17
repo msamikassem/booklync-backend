@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.core import rbac
+from app.core.exceptions import AppException
 from app.core.dependencies import CurrentUser, get_current_user
 from app.schemas.employee import (
     EmployeeCreate,
@@ -203,8 +204,17 @@ async def upload_profile_picture(
     db: Session = Depends(get_db),
     current: CurrentUser = Depends(get_current_user),
 ):
-    """Upload a profile picture for an employee. Max size: 2MB."""
+    """Upload a profile picture for an employee. Must be an image; max size: 2MB."""
     current.require(rbac.P_EDIT_EMPLOYEE_DETAILS, agent_id=agent_id)
+
+    # Only accept real images — don't store arbitrary uploaded files as a "picture".
+    allowed = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+    if (file.content_type or "").lower() not in allowed:
+        raise AppException(
+            detail="Profile picture must be a JPEG, PNG, WebP, or GIF image",
+            code="INVALID_FILE_TYPE",
+            status_code=400,
+        )
     content = await file.read()
 
     employee = employee_service._get_employee_orm(db, employee_id, agent_id, current.business_id)

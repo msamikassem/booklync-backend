@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from app.db.session import get_db
-from app.models.models import AIAgent, Service
+from app.models.models import AIAgent, Service, ServiceVariation
 from app.core.exceptions import NotFoundException
 
 router = APIRouter()
@@ -56,8 +56,10 @@ class PublicServiceResponse(BaseModel):
     id: int
     name: str
     description: Optional[str] = None
-    duration_minutes: int
-    price: float
+    # Nullable: a variation-based service has no flat price/duration of its own —
+    # we surface the cheapest active variation as the "from" price/duration.
+    duration_minutes: Optional[int] = None
+    price: Optional[float] = None
 
     model_config = {"from_attributes": True}
 
@@ -146,13 +148,29 @@ def get_public_services(slug: str, db: Session = Depends(get_db)):
         .all()
     )
 
-    return [
-        PublicServiceResponse(
+    out = []
+    for s in services:
+        price = s.price
+        duration = s.duration_minutes
+        # Variation-based service: flat price/duration are NULL — fall back to the
+        # cheapest active variation so the public menu shows a "from" price.
+        if price is None or duration is None:
+            cheapest = (
+                db.query(ServiceVariation)
+                .filter(ServiceVariation.service_id == s.id, ServiceVariation.active == True)
+                .order_by(ServiceVariation.price.asc())
+                .first()
+            )
+            if cheapest:
+                if price is None:
+                    price = cheapest.price
+                if duration is None:
+                    duration = cheapest.duration_minutes
+        out.append(PublicServiceResponse(
             id=s.id,
             name=s.name,
             description=s.description,
-            duration_minutes=s.duration_minutes,
-            price=float(s.price),
-        )
-        for s in services
-    ]
+            duration_minutes=duration,
+            price=float(price) if price is not None else None,
+        ))
+    return out

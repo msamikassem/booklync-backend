@@ -588,6 +588,18 @@ def record_payment(
     business_id: int,
 ) -> Sale:
     """Record a payment (optionally with a tip) against a sale and re-settle it."""
+    # Lock the sale row up-front so concurrent payments serialize instead of racing
+    # (read-then-write TOCTOU); without this, N simultaneous "pay the balance" calls
+    # all succeed and over-settle the sale.
+    locked = db.query(Sale).filter(Sale.id == sale_id).with_for_update().first()
+    if not locked:
+        raise NotFoundException(detail="Sale not found", code="SALE_NOT_FOUND")
+
+    # Re-load FRESH under the lock. populate_existing() is essential: the endpoint
+    # (and other callers) may have already loaded this sale + its payments into the
+    # session's identity map BEFORE the lock; without populate_existing the cached
+    # (pre-lock) payments collection is reused, so the overpayment check below would
+    # read a stale balance and concurrent payments would still over-settle.
     sale = (
         db.query(Sale)
         .options(
@@ -596,10 +608,9 @@ def record_payment(
             selectinload(Sale.discounts),
         )
         .filter(Sale.id == sale_id)
+        .populate_existing()
         .first()
     )
-    if not sale:
-        raise NotFoundException(detail="Sale not found", code="SALE_NOT_FOUND")
 
     _get_agent_for_business(db, sale.agent_id, business_id)
 
@@ -607,6 +618,19 @@ def record_payment(
         raise ConflictException(
             detail=f"Cannot record a payment against a {sale.status.value} sale",
             code="SALE_CLOSED",
+        )
+
+    # Reject a payment that would settle more than the outstanding balance.
+    # Balance to settle = total − tips (tips are extra, not part of the balance);
+    # already-paid = sum of prior payment amounts. (The row lock above makes this
+    # read-modify-write safe under concurrency.)
+    settle_target = _money(sale.total) - _money(sale.tip_total)
+    already_paid = sum((_money(p.amount) for p in sale.payments), Decimal("0"))
+    outstanding = settle_target - already_paid
+    if _money(data.amount) - outstanding > Decimal("0.01"):
+        raise ConflictException(
+            detail=f"Payment exceeds the outstanding balance ({outstanding})",
+            code="PAYMENT_EXCEEDS_BALANCE",
         )
 
     payment = Payment(

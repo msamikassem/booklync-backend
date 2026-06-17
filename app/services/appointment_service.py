@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import pytz
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 from loguru import logger
 
@@ -27,6 +28,7 @@ from app.models.models import (
     Customer,
     Employee,
     EmployeeBranch,
+    EmployeeCapability,
     Service,
     ServiceVariation,
     DayOff,
@@ -419,6 +421,38 @@ def _resolve_service_duration(db: Session, agent_id: int, service_id: int, varia
     return service, variation, duration_minutes
 
 
+def _check_employee_capability(db: Session, employee_id: int, service: Service,
+                               variation_id: Optional[int]) -> None:
+    """Verify the employee is qualified to perform this service/variation.
+
+    Capability is granted downward: a title grant covers all its services/variations,
+    a service grant covers all its variations, a variation grant covers just that one.
+    The availability engine already excludes non-capable staff; this enforces the same
+    rule on the write path so a direct POST can't book an unqualified employee.
+    """
+    cap_conditions = [EmployeeCapability.service_id == service.id]
+    if variation_id is not None:
+        cap_conditions.append(EmployeeCapability.variation_id == variation_id)
+    else:
+        # no specific variation requested → any variation grant for this service qualifies
+        var_ids = db.query(ServiceVariation.id).filter(
+            ServiceVariation.service_id == service.id
+        ).scalar_subquery()
+        cap_conditions.append(EmployeeCapability.variation_id.in_(var_ids))
+    if service.title_id:
+        cap_conditions.append(EmployeeCapability.title_id == service.title_id)
+
+    capable = db.query(EmployeeCapability.id).filter(
+        EmployeeCapability.employee_id == employee_id,
+        or_(*cap_conditions),
+    ).first()
+    if not capable:
+        raise ConflictException(
+            detail="This employee is not qualified to perform the selected service",
+            code="EMPLOYEE_NOT_CAPABLE",
+        )
+
+
 def _check_day_offs(db: Session, agent: AIAgent, employee_id: int, appt_date) -> None:
     """Raise if the branch is closed or the employee is off on the given date."""
     branch_day_off = db.query(DayOff).filter(
@@ -573,6 +607,9 @@ def create_appointment(
         db, data.agent_id, data.service_id, data.variation_id
     )
 
+    # Step 4b — employee must be qualified for this service/variation
+    _check_employee_capability(db, data.employee_id, service, data.variation_id)
+
     # Step 5 — calculate end_time
     end_time = data.start_time + timedelta(minutes=duration_minutes)
 
@@ -699,6 +736,7 @@ def create_appointments_batch(
         service, variation, duration_minutes = _resolve_service_duration(
             db, data.agent_id, item.service_id, item.variation_id
         )
+        _check_employee_capability(db, item.employee_id, service, item.variation_id)
         item_start = cursor
         item_end = cursor + timedelta(minutes=duration_minutes)
         resolved.append({
@@ -924,6 +962,10 @@ def update_appointment(
 
     # always load service — needed for prep-time checks and duration recalculation
     service = db.query(Service).filter(Service.id == appointment.service_id).first()
+
+    # if reassigning, the new employee must be qualified for this service/variation
+    if data.employee_id and service:
+        _check_employee_capability(db, data.employee_id, service, appointment.variation_id)
 
     # recalculate end_time if start_time changed
     if data.start_time:

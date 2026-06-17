@@ -32,6 +32,24 @@ engine = create_engine(
     echo=settings.DEBUG,    # log all SQL statements in development
 )
 
+
+@event.listens_for(engine, "connect")
+def _force_utc_session(dbapi_connection, connection_record):
+    """Pin every DB connection's session timezone to UTC.
+
+    PostgreSQL returns TIMESTAMPTZ values in the *session* timezone, which otherwise
+    defaults to the host/server's local timezone. That made `start_time` (and every
+    other timestamp) serialize with the machine's offset (e.g. +08:00) instead of UTC,
+    violating the API contract that all times are UTC. With the session pinned to UTC,
+    every timestamp comes back UTC-aware (+00:00) regardless of where the server runs;
+    per-branch local times are still computed explicitly via pytz in the service layer.
+    """
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("SET TIME ZONE 'UTC'")
+    finally:
+        cursor.close()
+
 # ── Session factory ───────────────────────────────────────────────────────────
 # autocommit=False: we control when transactions are committed
 # autoflush=False:  we control when pending changes are flushed to the DB

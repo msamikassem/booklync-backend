@@ -10,6 +10,9 @@ An AI agent represents one deployed receptionist:
   - has employees, services, and business hours under it
 """
 
+import re
+
+import pytz
 from pydantic import BaseModel, field_validator
 from typing import Optional
 from datetime import datetime
@@ -30,6 +33,36 @@ def _validate_tax_rate(value: Optional[Decimal]) -> Optional[Decimal]:
     if value is not None and (value < 0 or value > 100):
         raise ValueError("Tax rate must be a percentage between 0 and 100")
     return value
+
+
+def _validate_timezone(value: Optional[str]) -> Optional[str]:
+    """Validate an IANA timezone name (e.g. 'America/New_York'). Rejects typos
+    that would otherwise be silently treated as UTC and break the tz-duality."""
+    if value is None:
+        return value
+    v = value.strip()
+    if not v:
+        raise ValueError("Timezone cannot be empty")
+    if v not in pytz.all_timezones_set:
+        raise ValueError(f"'{v}' is not a valid IANA timezone (e.g. 'America/New_York', 'UTC')")
+    return v
+
+
+_PHONE_RE = re.compile(r"^\+?[0-9\s\-().]+$")
+
+
+def _validate_phone(value: Optional[str]) -> Optional[str]:
+    """Validate a phone number is plausibly E.164-ish (digits + common separators,
+    7–15 digits). Rejects free-text like 'notaphone' that would break Twilio routing."""
+    if value is None:
+        return value
+    v = value.strip()
+    if not v:
+        raise ValueError("Phone number cannot be empty")
+    digits = re.sub(r"\D", "", v)
+    if not _PHONE_RE.match(v) or not (7 <= len(digits) <= 15):
+        raise ValueError("Phone number must be a valid phone (7–15 digits, e.g. +15551234567)")
+    return v
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -55,26 +88,14 @@ class AgentCreate(BaseModel):
 
     _v_currency = field_validator("currency")(_validate_currency)
     _v_tax_rate = field_validator("tax_rate")(_validate_tax_rate)
+    _v_phone = field_validator("phone_number")(_validate_phone)
+    _v_timezone = field_validator("timezone")(_validate_timezone)
 
     @field_validator("agent_name")
     @classmethod
     def agent_name_not_empty(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("Agent name cannot be empty")
-        return value.strip()
-
-    @field_validator("phone_number")
-    @classmethod
-    def phone_number_not_empty(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Phone number cannot be empty")
-        return value.strip()
-
-    @field_validator("timezone")
-    @classmethod
-    def timezone_not_empty(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Timezone cannot be empty")
         return value.strip()
 
     @field_validator("location_name")
@@ -111,6 +132,8 @@ class AgentUpdate(BaseModel):
 
     _v_currency = field_validator("currency")(_validate_currency)
     _v_tax_rate = field_validator("tax_rate")(_validate_tax_rate)
+    _v_phone = field_validator("phone_number")(_validate_phone)
+    _v_timezone = field_validator("timezone")(_validate_timezone)
 
     @field_validator("agent_name")
     @classmethod
@@ -119,13 +142,6 @@ class AgentUpdate(BaseModel):
             raise ValueError("Agent name cannot be empty")
         return value.strip() if value else value
 
-    @field_validator("phone_number")
-    @classmethod
-    def phone_number_not_empty(cls, value: Optional[str]) -> Optional[str]:
-        if value is not None and not value.strip():
-            raise ValueError("Phone number cannot be empty")
-        return value.strip() if value else value
-    
     @field_validator("sms_post_welcome_behavior")  # 👈
     @classmethod
     def validate_post_welcome_behavior(cls, value: Optional[str]) -> Optional[str]:

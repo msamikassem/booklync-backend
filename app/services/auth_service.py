@@ -14,7 +14,7 @@ from sqlalchemy.sql import func
 from loguru import logger
 
 from app.core import rbac
-from app.models.models import AIAgent, Business, User, UserBranchRole
+from app.models.models import AIAgent, Business, BusinessType, User, UserBranchRole
 from app.schemas.auth import BusinessRegister, BusinessLogin
 from app.core.security import (
     hash_password,
@@ -41,6 +41,11 @@ def register(db: Session, data: BusinessRegister) -> dict:
 
     if db.query(Business).filter(Business.phone == data.phone).first():
         raise ConflictException(detail="An account with this phone number already exists", code="PHONE_TAKEN")
+
+    # Validate the business type exists before insert — otherwise the FK violation
+    # surfaces as an unhandled 500 instead of a clean 400.
+    if not db.query(BusinessType.id).filter(BusinessType.id == data.business_type_id).first():
+        raise NotFoundException(detail="Business type not found", code="BUSINESS_TYPE_NOT_FOUND")
 
     hashed = hash_password(data.password)
 
