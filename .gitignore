@@ -44,3 +44,12 @@ htmlcov/
 
 # Alembic (keep the folder, ignore generated files)
 alembic/versions/*.pyc
+
+# Runtime user uploads (website-builder site assets). employees/ is already tracked.
+uploads/sites/
+
+# Stress-test harness: keep the .py + analysis (SUMMARY/FIXES), ignore run artifacts.
+_stress/server.log
+_stress/findings.jsonl
+_stress/F.json
+_stress/REPORT.md
