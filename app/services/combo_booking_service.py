@@ -368,6 +368,11 @@ def book_combo(
         )
     employee = eligible[0]
 
+    # Serialize concurrent bookings for this employee so the block re-validation
+    # below is atomic with the inserts (prevents the double-booking race).
+    from app.services.appointment_service import _lock_employees_for_booking
+    _lock_employees_for_booking(db, [employee.id])
+
     start_aware = _ensure_tz_aware(start_time, tz)
     requested_date = start_aware.astimezone(tz).date()
 

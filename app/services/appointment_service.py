@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import pytz
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session, joinedload
 from loguru import logger
 
@@ -63,6 +63,32 @@ def _get_agent_for_business(db: Session, agent_id: int, business_id: int) -> AIA
     if agent.business_id != business_id:
         raise ForbiddenException(detail="You do not have access to this agent")
     return agent
+
+
+# Namespace for booking advisory locks (arbitrary constant; keeps these locks from
+# colliding with any other pg_advisory_lock usage).
+_BOOKING_LOCK_CLASS = 4242
+
+
+def _lock_employees_for_booking(db: Session, employee_ids) -> None:
+    """Serialize the slot check-and-insert for the given employee(s).
+
+    Without this, two concurrent requests both run the availability check (each in
+    its own connection, neither committed yet), both pass, and both insert → a
+    DOUBLE BOOKING. A Postgres transaction-scoped advisory lock per employee makes
+    check+insert atomic per employee: the loser blocks until the winner commits,
+    then its fresh READ COMMITTED snapshot sees the new row and fails the slot
+    check. Released automatically at commit/rollback. Lock in sorted order so a
+    multi-employee call (batch) can't deadlock against another ordering.
+
+    REQUIRES: the slot check + insert run in the SAME transaction as this lock,
+    with no commit in between (READ COMMITTED — verified default).
+    """
+    for eid in sorted({e for e in employee_ids if e is not None}):
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:c, :o)"),
+            {"c": _BOOKING_LOCK_CLASS, "o": int(eid)},
+        )
 
 
 def _get_tz(agent: AIAgent):
@@ -609,6 +635,10 @@ def create_appointment(
     # at this branch (per-branch flags live on EmployeeBranch).
     employee = _resolve_employee_at_branch(db, data.employee_id, data.agent_id)
 
+    # Serialize concurrent bookings for this employee so the slot check below is
+    # atomic with the insert (prevents the double-booking race). Held until commit.
+    _lock_employees_for_booking(db, [data.employee_id])
+
     # Step 4 — verify service + variation (if provided) and resolve duration
     service, variation, duration_minutes = _resolve_service_duration(
         db, data.agent_id, data.service_id, data.variation_id
@@ -753,6 +783,11 @@ def create_appointments_batch(
             "end": item_end,
         })
         cursor = item_end
+
+    # Lock every employee in this visit (sorted, deadlock-safe) so the slot checks
+    # below are atomic with the inserts — same double-booking guard as the single
+    # create path, across all lines of the visit.
+    _lock_employees_for_booking(db, [r["employee"].id for r in resolved])
 
     # Step 4 — validate each line against the day-offs / hours / breaks / existing
     # appointments. Nothing has been persisted yet, so a line's prep-aware overlap
@@ -983,6 +1018,9 @@ def update_appointment(
     # check for conflicts if employee or time changed
     if data.employee_id or data.start_time:
         tz = _get_tz(agent)
+        # Serialize against concurrent bookings for the target employee so a
+        # reschedule/reassign can't race into a slot another request is taking.
+        _lock_employees_for_booking(db, [new_employee_id])
         _validate_appointment_slot(
             db, agent, new_employee_id, new_start_time, new_end_time,
             service, exclude_appointment_id=appointment_id, tz=tz,
