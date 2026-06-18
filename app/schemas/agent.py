@@ -129,6 +129,7 @@ class AgentUpdate(BaseModel):
     currency: Optional[str] = None
     tax_rate: Optional[Decimal] = None
     tax_inclusive: Optional[bool] = None
+    public_booking_auto_confirm: Optional[bool] = None
 
     _v_currency = field_validator("currency")(_validate_currency)
     _v_tax_rate = field_validator("tax_rate")(_validate_tax_rate)
@@ -173,6 +174,7 @@ class AgentResponse(BaseModel):
     currency: str = "USD"
     tax_rate: Optional[Decimal] = None
     tax_inclusive: bool = False
+    public_booking_auto_confirm: bool = False
     active: bool
     created_at: datetime
 

@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     API_BASE_URL: str = "http://localhost:8000"
     FRONTEND_URL: str = "http://localhost:3000"
+    # The Next.js web app (dashboard + public sites). Kept distinct from
+    # FRONTEND_URL (which is load-bearing for CORS + the accept-invite redirect):
+    # used to call the app's on-demand revalidation endpoint after a site is
+    # published, and as the canonical origin for public booking links.
+    WEB_APP_URL: str = "http://localhost:5173"
 
     # ── Database ──────────────────────────────────────────────────────────
     DATABASE_URL: str
@@ -55,6 +60,24 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "uploads"
     SUPABASE_URL: str = ""          # required when STORAGE_BACKEND=supabase
     SUPABASE_SERVICE_KEY: str = ""  # service role key (not anon key)
+    # Website-builder image uploads (logos, hero/gallery photos). Larger than the
+    # 2MB profile-picture cap. Uses the SAME STORAGE_BACKEND switch above, so
+    # flipping to "supabase" later moves these too with no code change.
+    SITE_ASSET_MAX_MB: int = 8
+
+    # ── Website builder ───────────────────────────────────────────────────
+    # Shared secret the backend sends when asking the Next app to re-render a
+    # published site (POST {WEB_APP_URL}/api/revalidate). Must match the value
+    # the web app reads from REVALIDATE_SECRET. Empty = revalidation disabled
+    # (publish still works; the live page refreshes on its own ISR interval).
+    REVALIDATE_SECRET: str = ""
+    # How long a signed site-preview token stays valid (editor live preview).
+    PREVIEW_TOKEN_EXPIRE_MINUTES: int = 30
+    # Cloudflare Turnstile secret for verifying the public booking form. When set,
+    # the public booking endpoint requires + verifies a Turnstile token; when
+    # blank, the check is skipped (dev/no-op). Pair with the frontend's
+    # NEXT_PUBLIC_TURNSTILE_SITE_KEY.
+    TURNSTILE_SECRET: str = ""
 
     # ── Custom domains ────────────────────────────────────────────────────
     # Vercel API credentials — used to programmatically add/remove custom

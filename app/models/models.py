@@ -198,6 +198,11 @@ class AIAgent(Base):
     booking_page_slug = Column(Text, nullable=True, unique=True, index=True)
     custom_domain     = Column(Text, nullable=True, unique=True, index=True)
     domain_verified   = Column(Boolean, default=False, nullable=False, server_default="false")
+    # When true, public-site bookings are auto-confirmed (and send the customer a
+    # confirmation SMS) instead of landing as pending for staff review. Recommended
+    # only with spam protection (Turnstile) enabled — auto-confirm + an open
+    # endpoint can be abused to SMS arbitrary numbers.
+    public_booking_auto_confirm = Column(Boolean, default=False, nullable=False, server_default="false")
     # Financials are per-branch: a branch sets its own currency + tax. Every Sale
     # snapshots this currency; never mix currencies inside one sale or report.
     currency      = Column(String(3), nullable=False, default="USD", server_default="USD")  # ISO 4217
@@ -222,6 +227,47 @@ class AIAgent(Base):
     days_off          = relationship("DayOff",               back_populates="agent",    cascade="all, delete",
                                      primaryjoin="and_(DayOff.agent_id==AIAgent.id, DayOff.employee_id==None)",
                                      foreign_keys="DayOff.agent_id")
+    # The branch's public website (website builder). 1:1, optional.
+    site              = relationship("BranchSite",            back_populates="agent",
+                                     uselist=False, cascade="all, delete-orphan")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BranchSite
+# The website-builder document for a branch (1:1 with AIAgent).
+#
+# The whole site is a single JSON document (theme + ordered sections + brand +
+# seo). We keep TWO copies: `draft_config` (what the editor writes) and
+# `published_config` (what the public page renders), so editing never affects
+# the live site until the owner hits Publish.
+#
+# The config is intentionally treated as a (mostly) opaque document on the
+# backend — section *definitions* live in the frontend (TS), so adding a new
+# section/theme is a frontend-only change with no migration. The backend only
+# guards structure (see site_service._validate_config).
+# ─────────────────────────────────────────────────────────────────────────────
+class BranchSite(Base):
+    __tablename__ = "branch_sites"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    # 1:1 with a branch — enforced at the DB level (not just uselist=False).
+    agent_id          = Column(Integer, ForeignKey("ai_agents.id", ondelete="CASCADE"),
+                               nullable=False, unique=True, index=True)
+    # Which base theme the draft was seeded from (informational; the real layout
+    # lives in the config). Nullable until the owner picks a theme.
+    theme_id          = Column(Text, nullable=True)
+    # The working copy the editor reads/writes.
+    draft_config      = Column(JSONB, nullable=False)
+    # The live copy the public page renders. NULL = never published yet.
+    published_config  = Column(JSONB, nullable=True)
+    published_version = Column(Integer, nullable=False, default=0, server_default="0")
+    published_at      = Column(DateTime(timezone=True), nullable=True)
+    # Plan-gated white-label: hide the "Powered by Booklync" footer.
+    branding_removed  = Column(Boolean, nullable=False, default=False, server_default="false")
+    created_at        = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at        = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    agent = relationship("AIAgent", back_populates="site")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
