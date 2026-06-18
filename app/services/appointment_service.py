@@ -568,9 +568,16 @@ def create_appointment(
     db: Session,
     data: AppointmentCreate,
     business_id: int,
+    status: Optional["AppointmentStatusEnum"] = None,
 ) -> dict:
     """
     Create a new appointment.
+
+    `status` lets a caller force the initial status (e.g. the public booking page
+    creates `pending` so staff can review before confirming). Defaults to
+    `confirmed`, so every existing caller is unaffected. The confirmation SMS is
+    only sent for `confirmed` bookings — a pending public booking must not text a
+    phone number that hasn't been verified.
 
     Steps:
     1. Verify agent belongs to business
@@ -633,11 +640,8 @@ def create_appointment(
         db, agent, data.employee_id, data.start_time, end_time, service, tz=tz
     )
 
-    # Step 8 — determine default status
-    #if data.source.value in ("dashboard", "manual"):
-    default_status = AppointmentStatusEnum.confirmed
-    #else:
-    #    default_status = AppointmentStatusEnum.pending
+    # Step 8 — determine status (caller override → else confirmed, as before)
+    final_status = status or AppointmentStatusEnum.confirmed
 
     # Step 9 — create
     appointment = Appointment(
@@ -653,7 +657,7 @@ def create_appointment(
         variation_name=variation.name if variation else None,
         start_time=data.start_time,
         end_time=end_time,
-        status=default_status,
+        status=final_status,
         source=data.source,
         note=data.note,
     )
@@ -662,13 +666,15 @@ def create_appointment(
     db.commit()
     db.refresh(appointment)
 
-    # send confirmation SMS immediately after booking
-    try:
-        from app.services.notification_service import send_confirmation
-        send_confirmation(db, appointment.id)
-    except Exception as e:
-        # never let notification failure break the booking
-        logger.warning(f"Confirmation SMS failed for appointment {appointment.id}: {e}")
+    # Send the confirmation SMS only for confirmed bookings. A pending public
+    # booking (unverified phone) must not trigger an outbound SMS.
+    if final_status == AppointmentStatusEnum.confirmed:
+        try:
+            from app.services.notification_service import send_confirmation
+            send_confirmation(db, appointment.id)
+        except Exception as e:
+            # never let notification failure break the booking
+            logger.warning(f"Confirmation SMS failed for appointment {appointment.id}: {e}")
 
     logger.info(
         f"Appointment created: id={appointment.id} "

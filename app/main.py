@@ -42,6 +42,7 @@ from app.api.v1.endpoints import public
 from app.api.v1.endpoints import staff_auth
 from app.api.v1.endpoints import users
 from app.api.v1.endpoints import financials
+from app.api.v1.endpoints import sites
 
 
 # ── Scheduler instance ────────────────────────────────────────────────────────
@@ -151,6 +152,7 @@ def create_app() -> FastAPI:
     app.include_router(staff_auth.router,       prefix="/api/v1/staff",         tags=["Staff"])
     app.include_router(users.router,            prefix="/api/v1/users",         tags=["Users & Roles"])
     app.include_router(financials.router,       prefix="/api/v1/financials",    tags=["Financials"])
+    app.include_router(sites.router,            prefix="/api/v1/sites",         tags=["Website Builder"])
 
     @app.get("/health", tags=["Health"])
     def health_check():
